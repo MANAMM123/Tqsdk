@@ -15,10 +15,10 @@ TqSdk 是信易科技开源的 Python 量化交易开发包，面向国内期货
   A. 用户入场规则：缠论中枢二买方向 + 35-15 DTE + IV>HV + OI递减 + 期权墙
   B. 塔勒布风控：尾部保险(杠铃) + 最坏单日(WCD)定仓位 + 不加杠杆 + 集中度限制
 
-卖方 Greeks 三阶段：
-  阶段一 建仓期 DTE 35-15：方向确认 → IV 筛选 → 期权墙 → 开仓 + 买保险
-  阶段二 持仓期 DTE 14-5 ：Delta/Gamma 监控 → 移动止盈 → 期权墙迁移检测
-  阶段三 到期期 DTE ≤ 4 ：Gamma 爆炸评估 → 平仓 or 移仓
+卖方 Greeks 三阶段（按用户纠正）：
+  阶段一 建仓期 DTE 35-15 ：缠论二买定方向 + IV>HV + OI递减 + 期权墙 → 开仓 + 尾部保险
+  阶段二 持仓期 DTE 15-10 ：Delta/Gamma 监控 → 移动止盈(回撤≤50%) → 期权墙迁移检测
+  阶段三 硬止盈止损 DTE ≤10：无论盈亏强制平仓（HARD_TP / HARD_STOP）
 
 【Greeks 阶段关注点】
   阶段一：Theta(正) / Vega(负) / Delta(中性微偏)
@@ -52,29 +52,34 @@ INIT_BALANCE = 100000.0
 RISK_FREE_RATE = 0.025
 DEADLINE = 20
 
-# --- 建仓阶段参数 ---
+# --- 希腊字母三阶（按 DTE 划分）---
+# 阶段一 建仓: 35-15 DTE
+# 阶段二 持仓: 15-10 DTE
+# 阶段三 硬止盈止损: ≤10 DTE
+
+# --- 阶段一 建仓参数 ---
 ENTRY_DTE_MIN = 15          # 建仓最小到期天数
 ENTRY_DTE_MAX = 35          # 建仓最大到期天数
 IV_PREMIUM_MIN = 0.15       # IV 相对 HV 最低溢价
 OI_DECLINE_DAYS = 2         # OI 连续减少天数阈值
 WALL_DISTANCE_MAX = 0.05    # 距期权墙最大距离（5%）
-TAIL_INSURANCE_DELTA = 0.10 # 尾部保险腿目标 Delta
+TAIL_INSURANCE_DELTA = 0.10 # 尾部保险腿目标 Delta（风控建议1）
 
-# --- 持仓阶段参数 ---
-MANAGE_DTE_MAX = 14         # 持仓管理阶段上界
+# --- 阶段二 持仓管理参数 ---
+MANAGE_DTE_MIN = 10         # 持仓管理阶段下界（进入硬止盈止损）
+MANAGE_DTE_MAX = 15         # 持仓管理阶段上界
 DELTA_LIMIT = 0.30          # Delta 漂移上限（绝对值）
 TP_RETRACE_RATIO = 0.50     # 移动止盈：权利金回撤不超过 50%
 WALL_SHIFT_ALERT = 0.02     # 期权墙迁移告警阈值
 
-# --- 到期阶段参数 ---
-EXPIRY_DTE = 4              # 进入到期阶段的 DTE 阈值
-GAMMA_EXPLOSION = 0.05      # Gamma 爆炸阈值（占标的价比例）
+# --- 阶段三 硬止盈止损参数 ---
+HARD_EXIT_DTE = 10          # DTE ≤ 10 强制平仓（硬止盈止损）
 
-# --- 风控参数（塔勒布） ---
-WCD_RATIO = 0.02            # 最坏单日亏损不超过组合 2%
-MAX_POS_PER_UL = 0.15       # 单品种保证金占比上限
-MAX_TOTAL_SELL_MARGIN = 0.40  # 总卖方保证金占比上限
-INSURANCE_BUDGET_RATIO = 0.0333  # 尾部保险预算
+# --- 风控参数（塔勒布三条建议）---
+WCD_RATIO = 0.02            # 建议2：最坏单日亏损不超过组合 2%（据此定仓位）
+MAX_POS_PER_UL = 0.15       # 建议3：单品种保证金占比上限 15%
+MAX_TOTAL_SELL_MARGIN = 0.40  # 总卖方保证金占比上限 40%
+INSURANCE_BUDGET_RATIO = 0.0333  # 尾部保险预算占净值比例
 
 
 # ============ Black-Scholes 工具 ============
@@ -301,46 +306,43 @@ class PositionManager:
         if not iv:
             return "HOLD", "IV无法计算"
         delta, gamma, vega, theta = option_greeks(S, K, T, RISK_FREE_RATE, iv, q.option_class)
-        # Delta 漂移检查
+        # Delta 漂移检查（阶段二管理）
         if abs(delta) > DELTA_LIMIT:
             return "ADJUST", f"Delta={delta:.2f} 超过阈值 {DELTA_LIMIT}"
-        # Gamma 爆炸预检
-        if gamma * S > GAMMA_EXPLOSION and T < 7 / 365:
-            return "CLOSE", f"Gamma={gamma*S:.4f} 接近爆炸"
         # 移动止盈：权利金从最高点回撤超过 50%
         profit = self.entry_premium - price  # 卖方浮盈 = 权利金下跌
         if profit > self.max_profit:
             self.max_profit = profit
         if self.max_profit > 0 and (self.max_profit - profit) > TP_RETRACE_RATIO * self.entry_premium:
             return "TP", f"权利金回撤超 {TP_RETRACE_RATIO*100:.0f}%"
-        # 硬止损：亏损超过 1 倍权利金
+        # 硬止损：亏损超过 1 倍权利金（阶段三也会触发，但提前拦截）
         if profit < -self.entry_premium:
             return "STOP", f"亏损超 1 倍权利金"
-        return "HOLD", f"Δ={delta:.2f} Γ={gamma*S:.4f} Θ={theta:.2f} 浮盈={profit:.2f}"
+        return "HOLD", f"Δ={delta:.2f} Γ={gamma*S:.5f} V={vega:.1f} Θ={theta:.1f} 浮盈={profit:.2f}"
 
 
-# ============ 阶段三：到期决策 ============
-class ExpiryManager:
-    """到期阶段决策器"""
+# ============ 阶段三：硬止盈止损 ============
+class HardExitManager:
+    """阶段三：DTE ≤ 10 强制平仓（硬止盈止损）
+
+    到 10 DTE 不再持有，无论盈亏都平仓：
+      - 浮盈 → 硬止盈（锁定 Theta 收益）
+      - 浮亏 → 硬止损（避免到期 Gamma 爆炸）
+    """
 
     @staticmethod
-    def decide(q, ul_q):
-        """DTE ≤ 4 时决策：CLOSE / ROLL / HOLD"""
+    def decide(q, entry_premium):
+        """返回 (动作, 原因)，动作: HARD_TP / HARD_STOP"""
         dte = q.expire_rest_days or 0
-        if dte > EXPIRY_DTE:
-            return "HOLD", f"DTE={dte} > {EXPIRY_DTE}"
-        S = get_price(ul_q)
-        K = q.strike_price
-        if not S:
-            return "HOLD", "无标的价"
-        otm_dist = abs(K - S) / S
-        # 深度 OTM 可持有到期归零
-        if otm_dist > 0.05:
-            return "HOLD", f"深OTM {otm_dist*100:.1f}%，可持有"
-        # 接近 ATM，Gamma 爆炸风险高 → 平仓或移仓
-        if otm_dist < 0.03:
-            return "CLOSE", f"近ATM {otm_dist*100:.1f}%，Gamma爆炸风险"
-        return "ROLL", f"OTM {otm_dist*100:.1f}%，建议移仓下月"
+        if dte > HARD_EXIT_DTE:
+            return "HOLD", f"DTE={dte} > {HARD_EXIT_DTE}"
+        price = get_price(q)
+        if price is None:
+            return "HOLD", "无价格"
+        profit = entry_premium - price  # 卖方浮盈
+        if profit >= 0:
+            return "HARD_TP", f"DTE={dte}≤{HARD_EXIT_DTE} 硬止盈，浮盈={profit:.2f}"
+        return "HARD_STOP", f"DTE={dte}≤{HARD_EXIT_DTE} 硬止损，浮亏={profit:.2f}"
 
 
 # ============ 主策略类 ============
@@ -359,9 +361,26 @@ class SellerGreeksSystem:
         self.trade_log.append(rec)
         print(f"  [LOG] {action} {symbol}: {detail}")
 
+    def _calc_wcd_volume(self, entry_price, volume_multiple):
+        """建议2：按最坏单日亏损(WCD)定仓位
+
+        卖方最坏单日亏损近似 = 权利金 × 2（跳空穿止损）× 乘数。
+        使该亏损 ≤ 组合 WCD_RATIO，反推手数。
+        """
+        wcd_loss = entry_price * 2 * volume_multiple  # 单腿最坏日亏
+        max_allowed = INIT_BALANCE * WCD_RATIO
+        vol = max(1, int(max_allowed / max(wcd_loss, 1)))
+        return vol
+
     def stage_one_entry(self, underlying, direction):
-        """阶段一：建仓"""
+        """阶段一：建仓（35-15 DTE）"""
         print(f"\n=== 阶段一 建仓: {underlying} 方向={direction} ===")
+        # 风控前置：集中度检查（建议3）
+        acc = self.api.get_account()
+        wait(self.api)
+        if acc.margin / max(acc.balance, 1) > MAX_TOTAL_SELL_MARGIN:
+            print(f"  总卖方保证金占比超限，不开新仓")
+            return
         # 1. 缠论二买确认
         chan_dir = chan_second_buy(self.api, underlying)
         if chan_dir != direction:
@@ -391,21 +410,28 @@ class SellerGreeksSystem:
         if not entry_price:
             print("  无可用限价")
             return
-        # 3. 开仓（卖方）
+        # 3. 按 WCD 定手数（建议2）
+        oq = self.api.get_quote(sym)
+        wait(self.api, deadline=5)
+        vol_mult = oq.volume_multiple or 10
+        volume = self._calc_wcd_volume(entry_price, vol_mult)
+        # 4. 开仓（卖方）
         order = self.api.insert_order(sym, direction="SELL", offset="OPEN",
-                                      volume=1, limit_price=entry_price)
+                                      volume=volume, limit_price=entry_price)
         wait(self.api, deadline=8)
-        self._log("ENTRY_SELL", sym, f"权利金={entry_price} IV溢价={best['iv_premium']*100:.1f}%")
-        # 4. 买尾部保险（杠铃）
+        self._log("ENTRY_SELL", sym,
+                  f"手数={volume} 权利金={entry_price} IV溢价={best['iv_premium']*100:.1f}% WCD手数")
+        # 5. 买尾部保险（杠铃，建议1）
         ins = self._buy_tail_insurance(underlying)
         if ins:
             self._log("ENTRY_INSURANCE", ins, "尾部对冲")
-        # 5. 记录持仓
+        # 6. 记录持仓
         self.positions[sym] = {
             "entry_premium": entry_price,
             "manager": PositionManager(self.api, entry_price),
             "stage": 1,
             "direction": direction,
+            "volume": volume,
         }
 
     def _buy_tail_insurance(self, underlying):
@@ -442,7 +468,7 @@ class SellerGreeksSystem:
         return None
 
     def stage_two_manage(self):
-        """阶段二：持仓管理"""
+        """阶段二：持仓管理（15-10 DTE）"""
         for sym, pos in list(self.positions.items()):
             if pos["stage"] != 1 and pos["stage"] != 2:
                 continue
@@ -450,51 +476,47 @@ class SellerGreeksSystem:
             q = self.api.get_quote(sym)
             wait(self.api)
             dte = q.expire_rest_days or 0
-            # 阶段切换
-            if dte <= EXPIRY_DTE:
+            # 阶段切换：≤10 DTE → 阶段三硬止盈止损
+            if dte <= HARD_EXIT_DTE:
                 pos["stage"] = 3
-                self._log("STAGE_3", sym, f"DTE={dte} 进入到期阶段")
+                self._log("STAGE_3", sym, f"DTE={dte}≤{HARD_EXIT_DTE} 进入硬止盈止损")
             elif dte <= MANAGE_DTE_MAX:
                 pos["stage"] = 2
             if action == "HOLD":
                 continue
-            if action in ("TP", "STOP", "CLOSE", "ADJUST"):
+            if action in ("TP", "STOP", "ADJUST"):
                 self._close_position(sym, action, reason)
 
-    def stage_three_expiry(self):
-        """阶段三：到期决策"""
+    def stage_three_hard_exit(self):
+        """阶段三：硬止盈止损（≤10 DTE 强制平仓）"""
         for sym, pos in list(self.positions.items()):
             if pos["stage"] != 3:
                 continue
             q = self.api.get_quote(sym)
             wait(self.api)
-            ul_q = self.api.get_quote(q.underlying_symbol)
-            wait(self.api)
-            action, reason = ExpiryManager.decide(q, ul_q)
-            if action == "CLOSE":
-                self._close_position(sym, "EXPIRY_CLOSE", reason)
-            elif action == "ROLL":
-                self._log("ROLL", sym, reason)
-                # 移仓：平当前 + 开下月同方向（此处仅记录，实盘需执行）
+            action, reason = HardExitManager.decide(q, pos["entry_premium"])
+            if action in ("HARD_TP", "HARD_STOP"):
+                self._close_position(sym, action, reason)
 
     def _close_position(self, sym, action, reason):
         lp = get_limit_price(self.api, sym, "BUY")  # 卖方平仓=买
         if not lp:
             return
+        vol = self.positions.get(sym, {}).get("volume", 1)
         self.api.insert_order(sym, direction="BUY", offset="CLOSE",
-                              volume=1, limit_price=lp)
+                              volume=vol, limit_price=lp)
         wait(self.api, deadline=8)
         self._log(action, sym, reason)
         del self.positions[sym]
 
     def run_cycle(self, underlying, direction):
-        """运行一个完整周期：建仓 → 管理 → 到期"""
+        """运行一个完整周期：建仓(35-15DTE) → 管理(15-10DTE) → 硬止盈止损(≤10DTE)"""
         self.stage_one_entry(underlying, direction)
-        # 持仓循环（演示：运行有限轮次）
+        # 持仓循环
         for _ in range(10):
             wait(self.api)
             self.stage_two_manage()
-            self.stage_three_expiry()
+            self.stage_three_hard_exit()
             if not self.positions:
                 break
 
