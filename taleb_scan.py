@@ -53,12 +53,8 @@ from datetime import datetime
 from tqsdk import TqApi, TqAuth, TqSim
 
 # ============ 配置 ============
-EXCHANGES = {
-    "SHFE": ["cu", "au", "ag", "rb", "al", "zn", "ni"],   # 上期所
-    "DCE":  ["m", "c", "i", "j", "jm", "p", "y"],          # 大商所
-    "CZCE": ["CF", "SR", "TA", "MA", "RM", "OI"],          # 郑商所
-    "GFEX": ["si", "lc"],                                 # 广期所（广州期货交易所）
-}
+# 交易所列表（品种动态发现，不硬编码）
+SCAN_EXCHANGES = ["SHFE", "DCE", "CZCE", "GFEX"]
 
 INIT_BALANCE = 100000.0          # 模拟账户初始资金
 HV_LOOKBACK = 20                 # 历史波动率回看天数
@@ -118,6 +114,59 @@ def get_main_contract(api, exch_prod):
     q = api.get_quote(f"KQ.m@{exch_prod}")
     wait(api)
     return q.underlying_symbol
+
+
+def discover_option_products(api, exchanges=SCAN_EXCHANGES):
+    """动态发现各交易所所有有期权的品种（不硬编码）
+
+    对每个交易所：
+      1. query_quotes 取全部在市期货
+      2. 提取 product_id
+      3. 对每个品种取主力合约（KQ.m@），查 query_options
+      4. 有在市期权的品种纳入扫描
+    """
+    result = {}
+    for exch in exchanges:
+        try:
+            futs = api.query_quotes(ins_class='FUTURE', exchange_id=exch, expired=False)
+        except Exception as e:
+            print(f"  [discover] {exch} 期货查询失败: {e}")
+            continue
+        products = sorted(set(f.split('.')[1].rstrip('0123456789') for f in futs))
+        opt_products = []
+        for p in products:
+            ul = None
+            try:
+                q = api.get_quote(f"KQ.m@{exch}.{p}")
+                wait(api, deadline=8)
+                ul = q.underlying_symbol
+            except Exception:
+                ul = None
+            if not ul:
+                # 回退：取该品种持仓量最大的合约
+                matching = [f for f in futs if f.split('.')[1].rstrip('0123456789') == p]
+                best, best_oi = None, -1
+                for m in matching:
+                    try:
+                        mq = api.get_quote(m)
+                        wait(api, deadline=5)
+                        oi = mq.open_interest or 0
+                        if oi > best_oi:
+                            best_oi, best = oi, m
+                    except Exception:
+                        continue
+                ul = best
+            if not ul:
+                continue
+            try:
+                opts = api.query_options(ul, expired=False)
+                if opts:
+                    opt_products.append(p)
+            except Exception:
+                pass
+        result[exch] = opt_products
+        print(f"  [discover] {exch}: {len(opt_products)} 个有期权品种 -> {opt_products}")
+    return result
 
 
 def compute_hv(api, underlying, lookback=HV_LOOKBACK):
@@ -316,7 +365,13 @@ def main():
                 auth=TqAuth(account, password))
     results = []
     try:
-        for exch, products in EXCHANGES.items():
+        # 动态发现全部有期权的品种（不硬编码）
+        print("[discover] 动态发现可交易期权品种...")
+        exch_products = discover_option_products(api)
+        total_products = sum(len(v) for v in exch_products.values())
+        print(f"[discover] 共发现 {total_products} 个有期权品种")
+
+        for exch, products in exch_products.items():
             for prod in products:
                 try:
                     ul_symbol = f"{exch}.{prod}"
