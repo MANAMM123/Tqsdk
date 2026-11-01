@@ -208,6 +208,13 @@ FIELDS = ["time", "symbol", "spot", "dte", "rv5", "rv10", "rv20", "parkinson20",
           "iv_atm", "iv_call_wing", "iv_put_wing", "vrp", "wing_vrp", "straddle", "verdict"]
 
 
+def normalize(symbol):
+    ex, _, code = symbol.partition(".")
+    if ex.upper() == "GFEX" and code:
+        return "GFEX." + code.lower()
+    return symbol
+
+
 def main():
     ap = argparse.ArgumentParser(description="CZCE 期权每日收盘 IV/RV 监控（多合约单连接）")
     ap.add_argument("--underlying", default="CZCE.MA612",
@@ -218,7 +225,7 @@ def main():
     ap.add_argument("--no-log", action="store_true")
     args = ap.parse_args()
 
-    symbols = [s.strip() for s in args.underlying.split(",") if s.strip()]
+    symbols = [normalize(s.strip()) for s in args.underlying.split(",") if s.strip()]
     if not symbols:
         sys.exit("--underlying 为空")
 
