@@ -213,6 +213,8 @@ def main():
     ap.add_argument("--underlying", default="CZCE.MA612",
                     help="逗号分隔，如 CZCE.MA612,CZCE.TA612")
     ap.add_argument("--log", default="/workspace/ma612_vol_log.csv")
+    ap.add_argument("--auth-file", default="~/.tqsdk_auth.env",
+                    help="快期凭据文件，默认 ~/.tqsdk_auth.env")
     ap.add_argument("--no-log", action="store_true")
     args = ap.parse_args()
 
@@ -220,7 +222,7 @@ def main():
     if not symbols:
         sys.exit("--underlying 为空")
 
-    user, pwd = load_auth()
+    user, pwd = load_auth(args.auth_file)
     api = TqApi(auth=TqAuth(user, pwd), web_gui=False)
     rows = []
     try:

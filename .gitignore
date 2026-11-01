@@ -2,6 +2,8 @@ node_modules/
 target/
 __pycache__/
 .env
+.secrets/
+.venv/
 dist/
 *.log
 .DS_Store
