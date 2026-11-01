@@ -144,35 +144,181 @@ def get_limit_price(api, symbol, direction):
     return float(p) if p and p > 0 else None
 
 
-# ============ 缠论方向判断（简化版中枢二买） ============
-def chan_second_buy(api, underlying):
-    """简化版缠论中枢二买判断
+# ============ 缠论工程化：分型 → 笔 → 段 → 中枢 → 二买 ============
+def _find_fractals(kl):
+    """识别顶分型 / 底分型
 
-    用 30 分钟 K 线识别：价格在中枢上方回踩不破中枢上沿 + MACD 回零轴后金叉。
-    真实缠论需递归笔段，这里给出可执行的工程化近似。
-    返回: 'LONG' / 'SHORT' / None
+    顶分型：中间K线高点 > 左右两根高点
+    底分型：中间K线低点 < 左右两根低点
+    返回: list of (index, type, price)  type in ('top','bottom')
     """
-    kl = api.get_kline_serial(underlying, 1800, data_length=120)  # 30min
-    wait(api)
-    if len(kl) < 60:
+    highs = kl["high"].values
+    lows = kl["low"].values
+    fractals = []
+    for i in range(1, len(kl) - 1):
+        if highs[i] > highs[i - 1] and highs[i] > highs[i + 1]:
+            fractals.append((i, "top", float(highs[i])))
+        elif lows[i] < lows[i - 1] and lows[i] < lows[i + 1]:
+            fractals.append((i, "bottom", float(lows[i])))
+    return fractals
+
+
+def _build_strokes(fractals):
+    """由分型构建笔
+
+    规则：
+      1. 相邻分型类型必须相反（顶-底 或 底-顶）
+      2. 两分型间至少有 1 根独立K线（index 差 ≥ 2）
+      3. 同方向连续分型取极值合并
+    返回: list of dict {start_idx, end_idx, type, high, low, start_price, end_price}
+    """
+    fr = list(fractals)
+    if len(fr) < 2:
+        return []
+    strokes = []
+    i = 0
+    while i < len(fr) - 1:
+        f1, f2 = fr[i], fr[i + 1]
+        # 同类型合并：取极值
+        if f1[1] == f2[1]:
+            if f1[1] == "top":
+                fr[i] = f2 if f2[2] > f1[2] else f1
+            else:
+                fr[i] = f2 if f2[2] < f1[2] else f1
+            fr.pop(i + 1)
+            continue
+        # 独立K线检查
+        if f2[0] - f1[0] < 2:
+            fr.pop(i + 1)
+            continue
+        stroke_type = "up" if f1[1] == "bottom" else "down"
+        strokes.append({
+            "start_idx": f1[0], "end_idx": f2[0],
+            "type": stroke_type,
+            "high": max(f1[2], f2[2]),
+            "low": min(f1[2], f2[2]),
+            "start_price": f1[2],
+            "end_price": f2[2],
+        })
+        i += 1
+    return strokes
+
+
+def _build_segments(strokes):
+    """由笔构建段
+
+    段至少 3 笔，且第 3 笔突破第 1 笔端点（确认趋势成立）。
+    返回: list of dict {start_stroke, end_stroke, type, high, low}
+    """
+    if len(strokes) < 3:
+        return []
+    segments = []
+    i = 0
+    while i < len(strokes) - 2:
+        s1, s2, s3 = strokes[i], strokes[i + 1], strokes[i + 2]
+        seg_dir = s1["type"]
+        if seg_dir == "up" and s3["end_price"] > s1["end_price"]:
+            segments.append({
+                "start_stroke": i, "end_stroke": i + 2, "type": "up",
+                "high": max(s["high"] for s in strokes[i:i + 3]),
+                "low": min(s["low"] for s in strokes[i:i + 3]),
+            })
+            i += 3
+            continue
+        if seg_dir == "down" and s3["end_price"] < s1["end_price"]:
+            segments.append({
+                "start_stroke": i, "end_stroke": i + 2, "type": "down",
+                "high": max(s["high"] for s in strokes[i:i + 3]),
+                "low": min(s["low"] for s in strokes[i:i + 3]),
+            })
+            i += 3
+            continue
+        i += 1
+    return segments
+
+
+def _find_zhongshu(segments):
+    """识别中枢
+
+    中枢 = 连续 3 个段的价格重叠区间：
+      zg（上沿）= min(各段高点)
+      zd（下沿）= max(各段低点)
+    仅当 zg > zd 时有重叠，返回 (zg, zd)，否则 None。
+    """
+    if len(segments) < 3:
         return None
-    closes = kl["close"].dropna().values
-    if len(closes) < 60:
-        return None
-    # 中枢：近 30 根的高低点区间
-    mid = closes[-30:]
-    zg, zd = np.max(mid), np.min(mid)
-    last = closes[-1]
-    # MACD
+    segs = segments[-3:]
+    zg = min(s["high"] for s in segs)
+    zd = max(s["low"] for s in segs)
+    return (zg, zd) if zg > zd else None
+
+
+def _macd_zero_axis(closes):
+    """MACD 零轴辅助确认
+
+    缠论中 MACD 零轴对应中枢位置。
+    返回: ('above_zero','below_zero','cross_up','cross_down')
+    """
     ema12 = pd.Series(closes).ewm(span=12).mean().values
     ema26 = pd.Series(closes).ewm(span=26).mean().values
     dif = ema12 - ema26
     dea = pd.Series(dif).ewm(span=9).mean().values
-    macd_hist = (dif - dea) * 2
-    # 二买：价格在中枢上方（last > zg），且 MACD 柱状由负转正
-    if last > zg and macd_hist[-1] > 0 and macd_hist[-3] <= 0:
+    hist = (dif - dea) * 2
+    if len(hist) < 3:
+        return "unknown"
+    if hist[-1] > 0 and hist[-3] <= 0:
+        return "cross_up"
+    if hist[-1] < 0 and hist[-3] >= 0:
+        return "cross_down"
+    return "above_zero" if dif[-1] > 0 else "below_zero"
+
+
+def chan_second_buy(api, underlying):
+    """工程化缠论中枢二买判断
+
+    完整管线：30min K线 → 分型 → 笔 → 段 → 中枢 → 二买
+    二买定义：
+      上涨二买(LONG)：最后一段向上突破中枢上沿 zg 后，回踩不破 zg，
+                       且 MACD 在零轴上方或金叉。
+      下跌二卖(SHORT)：最后一段向下跌破中枢下沿 zd 后，反弹不破 zd，
+                        且 MACD 在零轴下方或死叉。
+    返回: 'LONG' / 'SHORT' / None
+    """
+    kl = api.get_kline_serial(underlying, 1800, data_length=200)  # 30min
+    wait(api)
+    if len(kl) < 100:
+        return None
+    closes = kl["close"].dropna().values
+    if len(closes) < 100:
+        return None
+    # 1. 分型 → 笔 → 段 → 中枢
+    fractals = _find_fractals(kl)
+    if len(fractals) < 4:
+        return None
+    strokes = _build_strokes(fractals)
+    if len(strokes) < 3:
+        return None
+    segments = _build_segments(strokes)
+    if len(segments) < 3:
+        return None
+    zs = _find_zhongshu(segments)
+    if zs is None:
+        return None
+    zg, zd = zs
+    last_close = float(closes[-1])
+    last_seg = segments[-1]
+    # 2. MACD 零轴确认
+    macd_state = _macd_zero_axis(closes)
+    # 3. 二买判定
+    # 上涨二买：最后段向上，段高点 > zg，当前价回踩在 zg 上方
+    if (last_seg["type"] == "up" and last_seg["high"] > zg
+            and last_close > zg
+            and macd_state in ("above_zero", "cross_up")):
         return "LONG"
-    if last < zd and macd_hist[-1] < 0 and macd_hist[-3] >= 0:
+    # 下跌二卖：最后段向下，段低点 < zd，当前价反弹在 zd 下方
+    if (last_seg["type"] == "down" and last_seg["low"] < zd
+            and last_close < zd
+            and macd_state in ("below_zero", "cross_down")):
         return "SHORT"
     return None
 
@@ -366,11 +512,14 @@ class SellerGreeksSystem:
 
         卖方最坏单日亏损近似 = 权利金 × 2（跳空穿止损）× 乘数。
         使该亏损 ≤ 组合 WCD_RATIO，反推手数。
+        若 1 手已超限，返回 0（跳过该笔交易）。
         """
-        wcd_loss = entry_price * 2 * volume_multiple  # 单腿最坏日亏
+        wcd_loss_per_lot = entry_price * 2 * volume_multiple  # 单腿最坏日亏
         max_allowed = INIT_BALANCE * WCD_RATIO
-        vol = max(1, int(max_allowed / max(wcd_loss, 1)))
-        return vol
+        if wcd_loss_per_lot > max_allowed:
+            return 0  # 单笔风险超限，不开仓
+        vol = int(max_allowed / wcd_loss_per_lot)
+        return max(1, vol)
 
     def stage_one_entry(self, underlying, direction):
         """阶段一：建仓（35-15 DTE）"""
@@ -415,6 +564,9 @@ class SellerGreeksSystem:
         wait(self.api, deadline=5)
         vol_mult = oq.volume_multiple or 10
         volume = self._calc_wcd_volume(entry_price, vol_mult)
+        if volume <= 0:
+            print(f"  WCD超限：权利金={entry_price} 乘数={vol_mult} 单笔风险>{WCD_RATIO*100:.0f}%，跳过")
+            return
         # 4. 开仓（卖方）
         order = self.api.insert_order(sym, direction="SELL", offset="OPEN",
                                       volume=volume, limit_price=entry_price)

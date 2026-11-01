@@ -44,6 +44,7 @@ TqSdk 是信易科技开源的 Python 量化交易开发包，面向国内期货
 
 import os
 import sys
+import re
 import math
 import numpy as np
 import pandas as pd
@@ -112,18 +113,14 @@ def wait(api, deadline=DEADLINE):
 def get_main_contract(api, exch_prod):
     """获取主力合约代码"""
     q = api.get_quote(f"KQ.m@{exch_prod}")
-    wait(api)
+    wait(api, deadline=3)
     return q.underlying_symbol
 
 
 def discover_option_products(api, exchanges=SCAN_EXCHANGES):
     """动态发现各交易所所有有期权的品种（不硬编码）
 
-    对每个交易所：
-      1. query_quotes 取全部在市期货
-      2. 提取 product_id
-      3. 对每个品种取主力合约（KQ.m@），查 query_options
-      4. 有在市期权的品种纳入扫描
+    优化：批量订阅所有 KQ.m@ 行情，一次 wait_update 读取，避免逐个等待。
     """
     result = {}
     for exch in exchanges:
@@ -132,30 +129,31 @@ def discover_option_products(api, exchanges=SCAN_EXCHANGES):
         except Exception as e:
             print(f"  [discover] {exch} 期货查询失败: {e}")
             continue
-        products = sorted(set(f.split('.')[1].rstrip('0123456789') for f in futs))
+        products = sorted(set(re.match(r'[A-Za-z]+', f.split('.')[1]).group() for f in futs))
+        # 批量订阅所有主力合约
+        main_quotes = {}
+        for p in products:
+            try:
+                main_quotes[p] = api.get_quote(f"KQ.m@{exch}.{p}")
+            except Exception:
+                pass
+        # 一次 wait_update 拉取全部
+        try:
+            api.wait_update(deadline=10)
+        except Exception:
+            pass
+        # 逐个读取 underlying_symbol
         opt_products = []
         for p in products:
+            q = main_quotes.get(p)
             ul = None
-            try:
-                q = api.get_quote(f"KQ.m@{exch}.{p}")
-                wait(api, deadline=8)
-                ul = q.underlying_symbol
-            except Exception:
-                ul = None
+            if q is not None:
+                ul = getattr(q, "underlying_symbol", None)
             if not ul:
-                # 回退：取该品种持仓量最大的合约
-                matching = [f for f in futs if f.split('.')[1].rstrip('0123456789') == p]
-                best, best_oi = None, -1
-                for m in matching:
-                    try:
-                        mq = api.get_quote(m)
-                        wait(api, deadline=5)
-                        oi = mq.open_interest or 0
-                        if oi > best_oi:
-                            best_oi, best = oi, m
-                    except Exception:
-                        continue
-                ul = best
+                # 快速回退：取该品种第一个在市合约
+                matching = [f for f in futs
+                            if re.match(r'[A-Za-z]+', f.split('.')[1]).group() == p]
+                ul = matching[0] if matching else None
             if not ul:
                 continue
             try:
@@ -173,7 +171,7 @@ def compute_hv(api, underlying, lookback=HV_LOOKBACK):
     """标的历史波动率（日收益年化）"""
     try:
         kl = api.get_kline_serial(underlying, 86400, data_length=lookback + 5)
-        wait(api)
+        wait(api, deadline=5)
     except Exception:
         return None
     closes = kl["close"].dropna().values
@@ -195,12 +193,17 @@ def get_option_price(q):
 
 
 # ============ 扫描 ============
-def scan_option(api, opt_symbol, hv):
-    q = api.get_quote(opt_symbol)
-    wait(api)
+def scan_option(api, opt_symbol, hv, opt_q=None, ul_q=None):
+    """扫描单个期权；opt_q/ul_q 为已订阅的行情对象（批量优化用）"""
+    if opt_q is None:
+        q = api.get_quote(opt_symbol)
+        wait(api)
+    else:
+        q = opt_q
     ul_sym = q.underlying_symbol
-    ul_q = api.get_quote(ul_sym)
-    wait(api)
+    if ul_q is None:
+        ul_q = api.get_quote(ul_sym)
+        wait(api)
     S = ul_q.last_price or ul_q.pre_settlement
     K = q.strike_price
     T = (q.expire_rest_days or 0) / 365.0
@@ -387,24 +390,27 @@ def main():
                     if not opts:
                         print(f"  跳过 {exch}.{prod}：无在市期权")
                         continue
-                    # 取最接近 ATM 的若干
+                    # 标的行情
                     ul_q = api.get_quote(main_sym)
-                    wait(api)
+                    api.wait_update(deadline=5)
                     ul_price = ul_q.last_price or ul_q.pre_settlement
                     if not ul_price:
                         continue
+                    # 从期权代码提取行权价，筛选近 ATM（不订阅全部期权）
                     near = []
                     for o in opts:
-                        oq = api.get_quote(o)
-                        wait(api, deadline=5)
-                        k = oq.strike_price
-                        if k:
-                            near.append((abs(k - ul_price), o))
+                        m = re.search(r'[CP](\d+\.?\d*)$', o)
+                        if m:
+                            k = float(m.group(1))
+                            near.append((abs(k - ul_price), o, k))
                     near.sort()
-                    near = [o for _, o in near[:MAX_OPTIONS_PER_UL]]
+                    near = near[:MAX_OPTIONS_PER_UL]
+                    # 仅订阅近 ATM 的 12 个期权
+                    opt_quotes = {o: api.get_quote(o) for _, o, _ in near}
+                    api.wait_update(deadline=5)
                     print(f"  扫描 {exch}.{prod}({main_sym}) HV={hv*100:.1f}% 期权{len(opts)}个 取近ATM {len(near)}个")
-                    for o in near:
-                        rec = scan_option(api, o, hv)
+                    for _, o, k in near:
+                        rec = scan_option(api, o, hv, opt_q=opt_quotes.get(o), ul_q=ul_q)
                         if rec:
                             rec["exchange"] = exch
                             rec["product"] = prod

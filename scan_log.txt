@@ -1,0 +1,205 @@
+在使用天勤量化之前，默认您已经知晓并同意以下免责条款，如果不同意请立即停止使用：https://www.shinnytech.com/blog/disclaimer/
+[2026-11-02 03:58:17.992510] 连接天勤，模拟账户初始资金 100,000 元
+[discover] 动态发现可交易期权品种...
+2026-11-02 03:58:18 -     INFO - 通知 : 与 wss://free-api.shinnytech.com/t/nfmd/front/mobile 的网络连接已建立
+  [discover] SHFE: 19 个有期权品种 -> ['ad', 'ag', 'al', 'ao', 'au', 'br', 'bu', 'cu', 'fu', 'hc', 'ni', 'op', 'pb', 'rb', 'ru', 'sn', 'sp', 'ss', 'zn']
+  [discover] DCE: 20 个有期权品种 -> ['a', 'b', 'bz', 'c', 'cs', 'eb', 'eg', 'i', 'j', 'jd', 'jm', 'l', 'lg', 'lh', 'm', 'p', 'pg', 'pp', 'v', 'y']
+  [discover] CZCE: 19 个有期权品种 -> ['AP', 'CF', 'CJ', 'FG', 'MA', 'OI', 'PF', 'PK', 'PL', 'PR', 'RM', 'SA', 'SF', 'SH', 'SM', 'SR', 'TA', 'UR', 'ZC']
+  [discover] GFEX: 5 个有期权品种 -> ['lc', 'pd', 'ps', 'pt', 'si']
+[discover] 共发现 63 个有期权品种
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.ad(SHFE.ad2701) HV=10.6% 期权60个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.ag(SHFE.ag2612) HV=36.9% 期权548个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.al(SHFE.al2612) HV=12.2% 期权102个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.ao(SHFE.ao2701) HV=19.6% 期权54个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.au(SHFE.au2612) HV=17.8% 期权176个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.br(SHFE.br2612) HV=28.3% 期权78个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.bu(SHFE.bu2701) HV=47.7% 期权90个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.cu(SHFE.cu2612) HV=10.7% 期权54个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.fu(SHFE.fu2701) HV=49.4% 期权150个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.hc(SHFE.hc2701) HV=6.0% 期权32个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.ni(SHFE.ni2612) HV=20.4% 期权60个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.op(SHFE.op2612) HV=13.0% 期权40个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.pb(SHFE.pb2612) HV=8.7% 期权54个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.rb(SHFE.rb2701) HV=8.2% 期权32个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.ru(SHFE.ru2701) HV=27.0% 期权68个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.sn(SHFE.sn2612) HV=31.3% 期权84个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.sp(SHFE.sp2701) HV=12.6% 期权50个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.ss(SHFE.ss2612) HV=14.9% 期权34个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 SHFE.zn(SHFE.zn2612) HV=11.4% 期权60个 取近ATM 12个
+  扫描 DCE.a(DCE.a2701) HV=17.5% 期权112个 取近ATM 0个
+  扫描 DCE.b(DCE.b2701) HV=15.9% 期权56个 取近ATM 0个
+  扫描 DCE.bz(DCE.bz2612) HV=43.5% 期权82个 取近ATM 0个
+  扫描 DCE.c(DCE.c2701) HV=10.2% 期权126个 取近ATM 0个
+  扫描 DCE.cs(DCE.cs2701) HV=10.6% 期权32个 取近ATM 0个
+  扫描 DCE.eb(DCE.eb2612) HV=40.4% 期权96个 取近ATM 0个
+  扫描 DCE.eg(DCE.eg2701) HV=34.0% 期权78个 取近ATM 0个
+  扫描 DCE.i(DCE.i2701) HV=17.4% 期权60个 取近ATM 0个
+  扫描 DCE.j(DCE.j2701) HV=24.6% 期权70个 取近ATM 0个
+  扫描 DCE.jd(DCE.jd2612) HV=31.3% 期权58个 取近ATM 0个
+  扫描 DCE.jm(DCE.jm2701) HV=32.7% 期权80个 取近ATM 0个
+  扫描 DCE.l(DCE.l2701) HV=28.9% 期权84个 取近ATM 0个
+  扫描 DCE.lg(DCE.lg2701) HV=6.8% 期权22个 取近ATM 0个
+  扫描 DCE.lh(DCE.lh2701) HV=30.4% 期权78个 取近ATM 0个
+  扫描 DCE.m(DCE.m2701) HV=12.6% 期权46个 取近ATM 0个
+  扫描 DCE.p(DCE.p2701) HV=21.5% 期权64个 取近ATM 0个
+  扫描 DCE.pg(DCE.pg2612) HV=37.2% 期权152个 取近ATM 0个
+  扫描 DCE.pp(DCE.pp2701) HV=31.2% 期权94个 取近ATM 0个
+  扫描 DCE.v(DCE.v2701) HV=20.6% 期权64个 取近ATM 0个
+  扫描 DCE.y(DCE.y2701) HV=17.1% 期权60个 取近ATM 0个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.AP(CZCE.AP701) HV=44.9% 期权86个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.CF(CZCE.CF701) HV=12.5% 期权116个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.CJ(CZCE.CJ701) HV=30.9% 期权106个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.FG(CZCE.FG701) HV=17.7% 期权104个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.MA(CZCE.MA701) HV=41.4% 期权88个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.OI(CZCE.OI701) HV=11.5% 期权90个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.PF(CZCE.PF612) HV=28.7% 期权64个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.PK(CZCE.PK612) HV=11.7% 期权50个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.PL(CZCE.PL612) HV=29.4% 期权86个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.PR(CZCE.PR612) HV=32.4% 期权66个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.RM(CZCE.RM701) HV=18.3% 期权100个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.SA(CZCE.SA701) HV=25.8% 期权92个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.SF(CZCE.SF701) HV=12.4% 期权44个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.SH(CZCE.SH701) HV=25.6% 期权104个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.SM(CZCE.SM701) HV=14.5% 期权44个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.SR(CZCE.SR701) HV=12.0% 期权62个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.TA(CZCE.TA701) HV=33.8% 期权64个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.UR(CZCE.UR701) HV=15.1% 期权68个 取近ATM 12个
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+  扫描 CZCE.ZC(CZCE.ZC701) HV=0.0% 期权100个 取近ATM 12个
+  扫描 GFEX.lc(GFEX.lc2701) HV=59.2% 期权202个 取近ATM 0个
+  扫描 GFEX.pd(GFEX.pd2612) HV=33.9% 期权176个 取近ATM 0个
+  扫描 GFEX.ps(GFEX.ps2612) HV=29.4% 期权102个 取近ATM 0个
+  扫描 GFEX.pt(GFEX.pt2612) HV=33.5% 期权190个 取近ATM 0个
+  扫描 GFEX.si(GFEX.si2612) HV=14.9% 期权62个 取近ATM 0个
+
+================================================================================
+扫描完成：348 个期权，2 个交易所
+================================================================================
+
+【判定分布】
+verdict
+SELL_WITH_HEDGE    215
+HOLD                96
+AVOID_SELL          37
+
+【可收租候选（需配保险）—— IV 溢价从高到低】
+exchange          ul             symbol type       iv  iv_premium  otm_dist  tail_risk
+    CZCE  CZCE.PL612   CZCE.PL612P11600  PUT 1.014532    2.454798  0.045233        0.0
+    CZCE  CZCE.PL612   CZCE.PL612P11400  PUT 0.940737    2.203502  0.027212        0.0
+    CZCE  CZCE.PL612   CZCE.PL612C11600 CALL 0.772000    1.628900  0.045233        0.0
+    SHFE SHFE.hc2701   SHFE.hc2701P3300  PUT 0.139322    1.321277  0.042325        0.0
+    SHFE SHFE.hc2701   SHFE.hc2701P3250  PUT 0.125805    1.096063  0.026532        0.0
+    SHFE SHFE.hc2701   SHFE.hc2701P3200  PUT 0.125562    1.092011  0.010739        0.0
+    SHFE SHFE.cu2612 SHFE.cu2612P102000  PUT 0.222482    1.088201  0.048951        0.0
+    SHFE SHFE.hc2701   SHFE.hc2701P3050  PUT 0.125126    1.084747  0.036639        0.0
+    SHFE SHFE.hc2701   SHFE.hc2701P3100  PUT 0.122303    1.037716  0.020846        0.0
+    SHFE SHFE.hc2701   SHFE.hc2701P3150  PUT 0.115044    0.916774  0.005054        0.0
+    SHFE SHFE.cu2612 SHFE.cu2612C102000 CALL 0.200385    0.880798  0.048951        0.0
+    SHFE SHFE.au2612    SHFE.au2612C808 CALL 0.333215    0.872091  0.028472        0.0
+    SHFE SHFE.hc2701   SHFE.hc2701C3300 CALL 0.111456    0.857000  0.042325        0.0
+    SHFE SHFE.zn2612  SHFE.zn2612C24600 CALL 0.211728    0.854016  0.038687        0.0
+    SHFE SHFE.cu2612 SHFE.cu2612P104000  PUT 0.192592    0.807660  0.030303        0.0
+
+================================================================================
+【杠铃组合构建与模拟下单】
+================================================================================
+账户权益 100,000  可用 100,000
+安全端(现金+缓冲)≈93,000  保险预算≈3,330
+2026-11-02 03:59:51 -     INFO - 模拟交易下单 TQSIM, PYSDK_insert_a479a399beba5be50eb41a81e6d95a11: 时间: 2026-10-31 02:31:32.268624, 合约: CZCE.PL612P11600, 开平: OPEN, 方向: SELL, 手数: 1, 价格: 994.5
+2026-11-02 03:59:51 -     INFO - 模拟交易委托单 TQSIM, PYSDK_insert_a479a399beba5be50eb41a81e6d95a11: 下单失败, 不在可交易时间段内
+  [下单] 卖开 CZCE.PL612P11600  限价=994.5  IV溢价=245.5%
+2026-11-02 03:59:51 -     INFO - 模拟交易下单 TQSIM, PYSDK_insert_0d5b5c8d8f915236a2b51ddf8f365824: 时间: 2026-10-31 02:31:32.271730, 合约: SHFE.hc2701P3300, 开平: OPEN, 方向: SELL, 手数: 1, 价格: 57.0
+2026-11-02 03:59:51 -     INFO - 模拟交易委托单 TQSIM, PYSDK_insert_0d5b5c8d8f915236a2b51ddf8f365824: 下单失败, 不在可交易时间段内
+  [下单] 卖开 SHFE.hc2701P3300  限价=57.0  IV溢价=132.1%
+/root/.pyenv/versions/3.14.8/lib/python3.14/asyncio/base_events.py:2062: UserWarning: 订阅多合约时推荐使用 api.get_quote_list 方法批量订阅。
+  handle._run()
+2026-11-02 04:00:05 -     INFO - 模拟交易下单 TQSIM, PYSDK_insert_c16377458c345dffb0ef009a50bb8fda: 时间: 2026-10-31 02:31:46.329459, 合约: CZCE.PL612P10000, 开平: OPEN, 方向: BUY, 手数: 3, 价格: 50.0
+2026-11-02 04:00:05 -     INFO - 模拟交易委托单 TQSIM, PYSDK_insert_c16377458c345dffb0ef009a50bb8fda: 下单失败, 不在可交易时间段内
+  [下单] 买保 CZCE.PL612P10000  限价=50.0  Delta=-0.102  手数=3
+2026-11-02 04:00:07 -     INFO - 模拟交易下单 TQSIM, PYSDK_insert_f0ccb3ef8506643083d67c0f5ec01b93: 时间: 2026-10-31 02:31:48.312177, 合约: SHFE.hc2701P3000, 开平: OPEN, 方向: BUY, 手数: 35, 价格: 12.0
+2026-11-02 04:00:07 -     INFO - 模拟交易委托单 TQSIM, PYSDK_insert_f0ccb3ef8506643083d67c0f5ec01b93: 下单失败, 不在可交易时间段内
+  [下单] 买保 SHFE.hc2701P3000  限价=12.0  Delta=-0.120  手数=35
+
+下单后账户权益 100,000  可用 100,000  保证金 0
+持仓：
+
+完整结果已保存: /workspace/taleb_scan_result.csv
+2026-11-02 04:00:07 -     INFO - 模拟交易成交记录, 账户: TQSIM
+2026-11-02 04:00:07 -     INFO - 模拟交易账户资金, 账户: TQSIM
+2026-11-02 04:00:07 -     INFO - 日期: 2026-11-02, 账户权益: 100000.00, 可用资金: 100000.00, 浮动盈亏: 0.00, 持仓盈亏: 0.00, 平仓盈亏: 0.00, 市值: 0.00, 保证金: 0.00, 手续费: 0.00, 风险度: 0.00%
+2026-11-02 04:00:07 -     INFO - 胜率: 0.00%, 盈亏额比例: inf, 收益率: 0.00%, 年化收益率: 0.00%, 最大回撤: 0.00%, 年化夏普率: inf,年化索提诺比率: -15.8114
