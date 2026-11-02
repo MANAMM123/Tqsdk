@@ -8,16 +8,25 @@ if (-not (Test-Path $exe)) {
 }
 
 $desktop = [Environment]::GetFolderPath("Desktop")
-$lnk = Join-Path $desktop "期权波动率雷达.lnk"
+$finalLnk = Join-Path $desktop "期权波动率雷达.lnk"
+# 先在纯 ASCII 路径上创建，再重命名，避免非中文区域设置下中文路径被转成 "?"
+$tmpLnk = Join-Path $desktop "OptionRadar-Shortcut-Temp.lnk"
 
 $shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($lnk)
+$shortcut = $shell.CreateShortcut($tmpLnk)
 $shortcut.TargetPath = $exe
 $shortcut.WorkingDirectory = $PSScriptRoot
 $shortcut.IconLocation = "$exe,0"
-$shortcut.Description = "期权波动率雷达：四大交易所 IV / HV / 偏度 / GEX"
+$shortcut.Description = "OptionRadar: IV / HV / Skew / GEX"
 $shortcut.WindowStyle = 1
 $shortcut.Save()
+
+if (Test-Path $tmpLnk) {
+    if (Test-Path $finalLnk) { Remove-Item $finalLnk -Force }
+    Rename-Item -Path $tmpLnk -NewName "期权波动率雷达.lnk" -Force
+}
+
+$lnk = $finalLnk
 
 if (Test-Path $lnk) {
     Write-Host "已创建桌面快捷方式：$lnk" -ForegroundColor Green

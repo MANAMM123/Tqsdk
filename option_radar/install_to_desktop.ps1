@@ -28,16 +28,26 @@ if ($src -ne $dest) {
 }
 
 $exe = Join-Path $dest $exeName
-$lnk = Join-Path $desktop "期权波动率雷达.lnk"
+$finalLnk = Join-Path $desktop "期权波动率雷达.lnk"
+# 先在纯 ASCII 路径上创建，再重命名：避免 WScript.Shell 在非中文区域设置下
+# 把中文路径转换成 "?" 导致保存失败
+$tmpLnk = Join-Path $desktop "OptionRadar-Shortcut-Temp.lnk"
 
 $shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($lnk)
+$shortcut = $shell.CreateShortcut($tmpLnk)
 $shortcut.TargetPath = $exe
 $shortcut.WorkingDirectory = $dest
 $shortcut.IconLocation = "$exe,0"
-$shortcut.Description = "期权波动率雷达：四大交易所 IV / HV / 偏度 / GEX"
+$shortcut.Description = "OptionRadar: IV / HV / Skew / GEX"
 $shortcut.WindowStyle = 1
 $shortcut.Save()
+
+if (Test-Path $tmpLnk) {
+    if (Test-Path $finalLnk) { Remove-Item $finalLnk -Force }
+    Rename-Item -Path $tmpLnk -NewName "期权波动率雷达.lnk" -Force
+}
+
+$lnk = $finalLnk
 
 Write-Host "安装完成：$dest" -ForegroundColor Green
 Write-Host "桌面快捷方式：$lnk" -ForegroundColor Green
