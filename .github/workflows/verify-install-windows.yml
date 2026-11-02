@@ -17,6 +17,26 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/MANAMM123/Tqsdk/releases/download/v1.0.2/OptionRadar-Windows.zip" -OutFile "$env:RUNNER_TEMP\app.zip"
           Expand-Archive "$env:RUNNER_TEMP\app.zip" -DestinationPath "$env:RUNNER_TEMP\pkg" -Force
 
+      - name: Diagnose shortcut COM
+        shell: pwsh
+        run: |
+          $d = [Environment]::GetFolderPath("Desktop")
+          Write-Host ("DESKTOP=" + $d)
+          Write-Host ("EXISTS=" + (Test-Path $d))
+          $sh = New-Object -ComObject WScript.Shell
+          foreach ($n in @("ascii_test", "测试快捷方式")) {
+            $p = Join-Path $d ($n + ".lnk")
+            try {
+              $s = $sh.CreateShortcut($p)
+              $s.TargetPath = "$env:WINDIR\notepad.exe"
+              $s.WorkingDirectory = $env:WINDIR
+              $s.Save()
+              Write-Host ("OK name=" + $n + " exists=" + (Test-Path $p))
+            } catch {
+              Write-Host ("FAIL name=" + $n + " msg=" + $_.Exception.Message)
+            }
+          }
+
       - name: Run install script
         shell: pwsh
         run: |
