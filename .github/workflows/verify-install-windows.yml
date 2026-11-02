@@ -1,0 +1,40 @@
+name: Verify Windows Installer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - name: Download release package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri "https://github.com/MANAMM123/Tqsdk/releases/download/v1.0.2/OptionRadar-Windows.zip" -OutFile "$env:RUNNER_TEMP\app.zip"
+          Expand-Archive "$env:RUNNER_TEMP\app.zip" -DestinationPath "$env:RUNNER_TEMP\pkg" -Force
+
+      - name: Run install script
+        shell: pwsh
+        run: |
+          Set-Location "$env:RUNNER_TEMP\pkg\OptionRadar"
+          "" | powershell -NoProfile -ExecutionPolicy Bypass -File .\install_to_desktop.ps1
+
+      - name: Verify desktop shortcut
+        shell: pwsh
+        run: |
+          $desktop = [Environment]::GetFolderPath("Desktop")
+          Write-Host "Desktop directory: $desktop"
+          $dest = Join-Path $desktop "OptionRadar"
+          $exe = Join-Path $dest "OptionRadar.exe"
+          $lnk = Join-Path $desktop "期权波动率雷达.lnk"
+          Write-Host ("EXE_EXISTS=" + (Test-Path $exe))
+          Write-Host ("LNK_EXISTS=" + (Test-Path $lnk))
+          if (-not (Test-Path $lnk)) { throw "desktop shortcut was not created" }
+          $sh = New-Object -ComObject WScript.Shell
+          $s = $sh.CreateShortcut($lnk)
+          Write-Host ("LNK_TARGET=" + $s.TargetPath)
+          Write-Host ("LNK_WORKDIR=" + $s.WorkingDirectory)
+          Write-Host ("LNK_ICON=" + $s.IconLocation)
+          if (-not (Test-Path $s.TargetPath)) { throw "shortcut target does not exist" }
+          Write-Host "INSTALL_VERIFIED"
