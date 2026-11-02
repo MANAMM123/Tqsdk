@@ -156,13 +156,16 @@ def main():
         print("=" * 60)
         if volume > 0:
             from seller_greeks_system import PositionManager
+            manager = PositionManager(api, entry_price)
             sys.positions[sym] = {
                 "entry_premium": entry_price,
-                "manager": PositionManager(api, entry_price),
+                "manager": manager,
                 "stage": 1,
                 "direction": direction,
                 "volume": volume,
             }
+            # 记录三阶 Greeks 建仓基线（相对倍数爆炸判定）
+            manager.capture_baseline(sym)
             # 运行一次持仓监控
             sys.stage_two_manage()
             sys.stage_three_hard_exit()

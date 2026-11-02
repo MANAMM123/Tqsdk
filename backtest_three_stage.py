@@ -28,7 +28,8 @@ from seller_greeks_system import (
     INIT_BALANCE, RISK_FREE_RATE, WCD_RATIO, TP_RETRACE_RATIO,
     HARD_EXIT_DTE, ENTRY_DTE_MIN, ENTRY_DTE_MAX,
     DELTA_LIMIT, IV_PREMIUM_MIN,
-    implied_vol, option_greeks, get_price, get_limit_price, wait,
+    implied_vol, option_greeks, option_greeks_full,
+    get_price, get_limit_price, wait,
     chan_second_buy, EntryFilter, PositionManager, HardExitManager,
 )
 
@@ -89,6 +90,22 @@ def test_hard_exit_logic():
         action, reason = HardExitManager.decide(FakeQ(dte, price), entry)
         ok = "✅" if action == expected else "❌"
         print(f"  DTE={dte:>2} 权利金={price:>5} 入场={entry} → {action:10s} {ok} ({reason})")
+
+    # 三阶 Greeks 双触发：DTE>10 时只有 Speed/Color 相对建仓基线爆炸才退出
+    print("\n  三阶双触发测试（基线 Speed=-1e-6, Color=-2e-3）:")
+    base_speed, base_color = -1e-6, -2e-3
+    for dte, price, speed, color, expected in [
+        (22, 150, -1e-6, -2e-3, "HOLD"),        # 未爆炸
+        (22, 150, -5e-6, -2e-3, "HARD_TP"),     # DTE>10，Speed 5x 爆炸（浮盈）
+        (22, 250, -1e-6, -8e-3, "HARD_STOP"),   # DTE>10，Color 4x 爆炸（浮亏）
+        (8,  150, -1e-6, -2e-3, "HARD_TP"),     # DTE≤10 时间触发
+        (8,  150, -5e-6, -8e-3, "HARD_TP"),     # 双条件同时满足
+    ]:
+        action, reason = HardExitManager.decide(
+            FakeQ(dte, price), entry, speed, color, base_speed, base_color)
+        ok = "✅" if action == expected else "❌"
+        print(f"  DTE={dte:>2} Speed={speed:.0e} Color={color:.0e} → "
+              f"{action:10s} {ok} ({reason})")
 
     # 测试移动止盈 (PositionManager)
     print("\n  移动止盈模拟（权利金从200跌到120再反弹到160）:")
@@ -164,6 +181,16 @@ def run_tqbacktest():
         wait(api, deadline=30)
         log.append(("ENTRY", sym, entry_price, dte))
 
+        # 记录三阶 Greeks 建仓基线（爆炸判定用相对倍数）
+        base_speed = base_color = None
+        T0 = (q.expire_rest_days or 0) / 365.0
+        if S and T0 > 0:
+            iv0 = implied_vol(entry_price, S, q.strike_price, T0, RISK_FREE_RATE, "PUT")
+            if iv0:
+                g0 = option_greeks_full(S, q.strike_price, T0, RISK_FREE_RATE, iv0, "PUT")
+                base_speed, base_color = g0["speed"], g0["color"]
+        print(f"  Greeks基线: Speed={base_speed} Color={base_color}")
+
         # 3. 回测主循环：推进时间，监控阶段切换
         max_profit = 0.0
         stage = 1
@@ -187,9 +214,20 @@ def run_tqbacktest():
                     stage = 2
                     print(f"  [阶段切换] → 阶段二 DTE={cur_dte} 持仓管理")
 
-            # 阶段三：硬退出
+            # 阶段三：硬退出（DTE ≤10 或 三阶 Greeks 相对基线爆炸，双触发）
             if stage == 3:
-                action, reason = HardExitManager.decide(oq, entry_price)
+                S_t = get_price(ul_q)
+                speed = color = None
+                T_t = (cur_dte or 0) / 365.0
+                if S_t and cur_price and T_t > 0:
+                    iv_t = implied_vol(cur_price, S_t, q.strike_price, T_t,
+                                       RISK_FREE_RATE, "PUT")
+                    if iv_t:
+                        gt = option_greeks_full(S_t, q.strike_price, T_t,
+                                                RISK_FREE_RATE, iv_t, "PUT")
+                        speed, color = gt["speed"], gt["color"]
+                action, reason = HardExitManager.decide(
+                    oq, entry_price, speed, color, base_speed, base_color)
                 if action in ("HARD_TP", "HARD_STOP"):
                     lp = get_limit_price(api, sym, "BUY")
                     if lp:
@@ -198,6 +236,7 @@ def run_tqbacktest():
                         wait(api, deadline=30)
                         log.append((action, sym, cur_price, cur_dte))
                         print(f"  [硬退出] {action} 权利金={cur_price} 浮盈={profit:.1f} DTE={cur_dte}")
+                        print(f"           原因: {reason}")
                         break
 
             # 阶段二：移动止盈

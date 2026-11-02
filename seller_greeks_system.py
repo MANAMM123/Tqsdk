@@ -86,8 +86,11 @@ VANNA_LIMIT = 10.0          # 二阶：Vanna 上限（Delta 对 IV 敏感度）
 
 # --- 三阶 Greeks 管理参数（硬退出触发）---
 HARD_EXIT_DTE = 10          # 时间触发：DTE ≤ 10 强制平仓
-SPEED_LIMIT = 0.001         # 三阶：Speed 上限（Γ 的价格变化率），超此 Gamma 失控
-COLOR_EXPLOSION = -0.0005   # 三阶：Color 阈值（Γ 的时间衰减率，负且绝对值大=加速爆炸）
+# 三阶爆炸用「相对建仓基线的倍数」判定，不用绝对值：
+#   不同品种/行权价/到期日的 Speed、Color 量纲差异极大（相差几个数量级），
+#   任何单一绝对阈值都会要么误杀全部仓位，要么永不触发。
+SPEED_EXPLOSION_MULT = 3.0  # |Speed| > 建仓时 |Speed| 的 3 倍 → Gamma 价格变化率失控
+COLOR_EXPLOSION_MULT = 3.0  # Color < 建仓时 Color 的 3 倍（更负）→ Gamma 时间衰减加速爆炸
 
 # --- 风控参数（塔勒布三条建议）---
 WCD_RATIO = 0.02            # 建议2：最坏单日亏损不超过组合 2%（据此定仓位）
@@ -186,6 +189,30 @@ def option_greeks_full(S, K, T, r, sigma, opt_type):
 
 def opt_type_sign(t):
     return 1.0 if t == "CALL" else -1.0
+
+
+def greeks_exploded(speed, color, base_speed, base_color,
+                    speed_mult=SPEED_EXPLOSION_MULT,
+                    color_mult=COLOR_EXPLOSION_MULT):
+    """三阶 Greeks 是否相对建仓基线爆炸（量纲无关）
+
+    Speed 为负/正都可能，取绝对值比较；Color 为负，越负代表 Gamma 随时间加速放大。
+    基线缺失（None / 0 / NaN）时不判定为爆炸，避免无依据地误杀仓位。
+    返回 (bool, 说明)
+    """
+    def _ok(v):
+        return v is not None and not (isinstance(v, float) and math.isnan(v)) and abs(v) > 0
+
+    reasons = []
+    if _ok(speed) and _ok(base_speed):
+        ratio = abs(speed) / abs(base_speed)
+        if ratio > speed_mult:
+            reasons.append(f"Speed|{speed:.3g}|={ratio:.2f}x基线(>{speed_mult}x)")
+    if _ok(color) and _ok(base_color) and color < 0 and base_color < 0:
+        ratio = color / base_color  # 两者为负，比值>1 表示更负
+        if ratio > color_mult:
+            reasons.append(f"Color {color:.3g}={ratio:.2f}x基线(>{color_mult}x)")
+    return bool(reasons), "; ".join(reasons)
 
 
 # ============ 行情辅助 ============
@@ -495,10 +522,39 @@ class EntryFilter:
 class PositionManager:
     """持仓 Greeks 管理器（按微分阶数：一阶→二阶→三阶）"""
 
-    def __init__(self, api, entry_premium):
+    def __init__(self, api, entry_premium, entry_speed=None, entry_color=None):
         self.api = api
         self.entry_premium = entry_premium  # 开仓时权利金
         self.max_profit = 0.0               # 持仓期间最大浮盈（权利金减少量）
+        # 三阶 Greeks 建仓基线（爆炸判定以相对倍数比较，不用绝对阈值）
+        self.base_speed = entry_speed
+        self.base_color = entry_color
+
+    def _set_baseline(self, speed, color):
+        if self.base_speed is None and self.base_color is None:
+            self.base_speed, self.base_color = speed, color
+            return True
+        return False
+
+    def capture_baseline(self, option_symbol, S=None):
+        """建仓时记录三阶 Greeks 基线（爆炸判定以相对倍数比较）"""
+        q = self.api.get_quote(option_symbol)
+        wait(self.api, deadline=5)
+        if S is None:
+            ul_q = self.api.get_quote(q.underlying_symbol)
+            wait(self.api, deadline=5)
+            S = get_price(ul_q)
+        K = q.strike_price
+        T = (q.expire_rest_days or 0) / 365.0
+        price = get_price(q)
+        if not all([S, K, price, T > 0]):
+            return None
+        iv = implied_vol(price, S, K, T, RISK_FREE_RATE, q.option_class)
+        if not iv:
+            return None
+        g = option_greeks_full(S, K, T, RISK_FREE_RATE, iv, q.option_class)
+        self.base_speed, self.base_color = g["speed"], g["color"]
+        return self.base_speed, self.base_color
 
     def monitor(self, option_symbol):
         """按三阶 Greeks 维度监控，返回 (动作, 原因)
@@ -527,11 +583,13 @@ class PositionManager:
         vega, speed, color = g["vega"], g["speed"], g["color"]
         gamma_norm = gamma * S  # 归一化 Gamma（消除价格量纲）
 
-        # 三阶 Greeks：Gamma 变化率爆炸 → 硬退出（无论 DTE）
-        if abs(speed) > SPEED_LIMIT or color < COLOR_EXPLOSION:
-            return ("HARD_EXIT",
-                    f"三阶爆炸 Speed={speed:.6f}(>{SPEED_LIMIT}) "
-                    f"Color={color:.6f}(<{COLOR_EXPLOSION})")
+        # 三阶 Greeks：相对建仓基线爆炸 → 硬退出（无论 DTE）
+        if self._set_baseline(speed, color):
+            print(f"  [基线] {option_symbol} Speed={speed:.3g} Color={color:.3g} 已记录")
+        else:
+            exploded, why = greeks_exploded(speed, color, self.base_speed, self.base_color)
+            if exploded:
+                return "HARD_EXIT", f"三阶爆炸 {why}"
 
         # 二阶 Greeks：Gamma 超限 → 减仓或对冲
         if gamma_norm > GAMMA_LIMIT:
@@ -568,25 +626,41 @@ class HardExitManager:
     """
 
     @staticmethod
-    def decide(q, entry_premium, speed=None, color=None):
-        """返回 (动作, 原因)，动作: HARD_TP / HARD_STOP / HOLD"""
-        dte = q.expire_rest_days or 0
-        price = get_price(q)
-        # 条件1：DTE 时间触发
-        time_trigger = dte <= HARD_EXIT_DTE
-        # 条件2：三阶 Greeks 爆炸触发
-        greeks_trigger = (speed is not None and abs(speed) > SPEED_LIMIT) or \
-                         (color is not None and color < COLOR_EXPLOSION)
+    def decide(q, entry_premium, speed=None, color=None,
+               base_speed=None, base_color=None):
+        """双触发硬退出：DTE ≤ HARD_EXIT_DTE 或 三阶 Greeks 相对基线爆炸
+
+        两个条件独立评估，满足其一即平仓；同时满足时原因会合并显示。
+        返回 (动作, 原因)，动作: HARD_TP / HARD_STOP / HOLD
+        """
+        dte = q.expire_rest_days
+        if dte is None or (isinstance(dte, float) and math.isnan(dte)):
+            time_trigger = False          # 无到期天数数据时不误触发，交给 Greeks 条件
+            dte = None
+        else:
+            time_trigger = dte <= HARD_EXIT_DTE
+
+        greeks_trigger, why = greeks_exploded(
+            speed, color, base_speed, base_color)
 
         if not (time_trigger or greeks_trigger):
-            return "HOLD", f"DTE={dte} Speed={speed} 未达硬退出条件"
+            return "HOLD", (f"DTE={dte} Speed={speed} Color={color} "
+                            f"未达硬退出条件（DTE>{HARD_EXIT_DTE} 且三阶未爆炸）")
+
+        price = get_price(q)
         if price is None:
-            return "HOLD", "无价格"
+            return "HOLD", "已触发但无可用价格，无法平仓"
+
+        src = []
+        if time_trigger:
+            src.append(f"DTE={dte}≤{HARD_EXIT_DTE}")
+        if greeks_trigger:
+            src.append(f"三阶爆炸({why})")
         profit = entry_premium - price  # 卖方浮盈
-        trigger_src = "DTE" if time_trigger else "三阶Greeks"
+        reason = " + ".join(src)
         if profit >= 0:
-            return "HARD_TP", f"{trigger_src}触发硬止盈，浮盈={profit:.2f}"
-        return "HARD_STOP", f"{trigger_src}触发硬止损，浮亏={profit:.2f}"
+            return "HARD_TP", f"{reason} → 硬止盈，浮盈={profit:.2f}"
+        return "HARD_STOP", f"{reason} → 硬止损，浮亏={profit:.2f}"
 
 
 # ============ 主策略类 ============
@@ -676,13 +750,18 @@ class SellerGreeksSystem:
         if ins:
             self._log("ENTRY_INSURANCE", ins, "尾部对冲")
         # 6. 记录持仓
+        manager = PositionManager(self.api, entry_price)
         self.positions[sym] = {
             "entry_premium": entry_price,
-            "manager": PositionManager(self.api, entry_price),
+            "manager": manager,
             "stage": 1,
             "direction": direction,
             "volume": volume,
         }
+        # 7. 记录三阶 Greeks 建仓基线（用于相对倍数爆炸判定）
+        base = manager.capture_baseline(sym, S)
+        if base:
+            self._log("GREEKS_BASELINE", sym, f"Speed={base[0]:.3g} Color={base[1]:.3g}")
 
     def _buy_tail_insurance(self, underlying):
         """买入同标的远 OTM put 做尾部保险"""
@@ -755,7 +834,9 @@ class SellerGreeksSystem:
                 if iv:
                     g = option_greeks_full(S, K, T, RISK_FREE_RATE, iv, q.option_class)
                     speed, color = g["speed"], g["color"]
-            action, reason = HardExitManager.decide(q, pos["entry_premium"], speed, color)
+            action, reason = HardExitManager.decide(
+                q, pos["entry_premium"], speed, color,
+                pos["manager"].base_speed, pos["manager"].base_color)
             if action in ("HARD_TP", "HARD_STOP"):
                 self._close_position(sym, action, reason)
 
