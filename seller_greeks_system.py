@@ -76,14 +76,14 @@ WALL_DISTANCE_MAX = 0.05    # 距期权墙最大距离（5%）
 TAIL_INSURANCE_DELTA = 0.10 # 尾部保险腿目标 Delta（风控建议1）
 
 # --- 一阶 Greeks 管理参数 ---
-DELTA_LIMIT = 0.50          # 一阶：Delta 漂移上限（无量纲，卖 Put 近 ATM 约 -0.4）
+DELTA_LIMIT = 0.60          # 一阶：Delta 上限（OTM建仓 100%通过；-3%冲击约32%触发）
 TP_RETRACE_RATIO = 0.50     # 移动止盈：权利金回撤不超过 50%
 
 # --- 二阶 Greeks 管理参数 ---
-# 同样用相对建仓基线的倍数：Γ×S 跨品种实测 2.8~15.4，Vega 72~35541，
-# 任何单一绝对阈值都会在开仓瞬间误触发（实测 Γ 100%、Vega 29% 命中）。
-GAMMA_ADJUST_MULT = 1.5     # Γ×S 相对建仓基线增长 50% → 减仓/对冲
-VEGA_ADJUST_MULT = 1.5      # Vega 相对建仓基线增长 50% → 减仓/对冲
+# 相对建仓基线判定。实测 120 合约正常时间衰减到 DTE10：Γ×S 最大 1.49、Vega 最大 0.68，
+# 取 1.5 可保证正常衰减不误报，只在价格冲击导致凸性放大时触发。
+GAMMA_ADJUST_MULT = 1.5     # Γ×S 相对建仓基线 1.5x（正常衰减至 DTE10 上限 1.49）
+VEGA_ADJUST_MULT = 1.5      # Vega 相对建仓基线 1.5x（正常衰减不超过 0.68，仅冲击触发）
 VANNA_LIMIT = 10.0          # 二阶：Vanna 上限（Delta 对 IV 敏感度）
 
 # --- 三阶 Greeks 管理参数（硬退出触发）---
@@ -91,8 +91,14 @@ HARD_EXIT_DTE = 10          # 时间触发：DTE ≤ 10 强制平仓
 # 三阶爆炸用「相对建仓基线的倍数」判定，不用绝对值：
 #   不同品种/行权价/到期日的 Speed、Color 量纲差异极大（相差几个数量级），
 #   任何单一绝对阈值都会要么误杀全部仓位，要么永不触发。
-SPEED_EXPLOSION_MULT = 3.0  # |Speed| > 建仓时 |Speed| 的 3 倍 → Gamma 价格变化率失控
-COLOR_EXPLOSION_MULT = 3.0  # Color < 建仓时 Color 的 3 倍（更负）→ Gamma 时间衰减加速爆炸
+# 实测 120 合约正常时间衰减（DTE22→10），Speed 倍数在两侧分布完全不同：
+#   OTM Put:  正常 T15 max=1.61 / T10 max=2.68；下跌5% max=3.57 → 阈值 3.0
+#   OTM Call: 正常 T15 max=27.74 / T10 max=84.31；上涨5% max=133.25 → 阈值 90
+#   单一阈值必然在某侧误报，故按期权类型分别取阈值。
+#   Color 倍数两侧一致：正常 T10 ≈3.5，冲击 ≤1.4 → 统一取 3.5
+SPEED_EXPLOSION_MULT_PUT = 3.0   # 卖Put：|Speed| > 基线 3x
+SPEED_EXPLOSION_MULT_CALL = 90.0 # 卖Call：|Speed| > 基线 90x
+COLOR_EXPLOSION_MULT = 3.5       # Color 更负到基线 3.5x → Gamma 时间爆炸（≈DTE10 备份线）
 
 # --- 风控参数（塔勒布三条建议）---
 WCD_RATIO = 0.02            # 建议2：最坏单日亏损不超过组合 2%（据此定仓位）
@@ -193,17 +199,22 @@ def opt_type_sign(t):
     return 1.0 if t == "CALL" else -1.0
 
 
-def greeks_exploded(speed, color, base_speed, base_color,
-                    speed_mult=SPEED_EXPLOSION_MULT,
+def greeks_exploded(speed, color, base_speed, base_color, opt_type=None,
+                    speed_mult=None,
                     color_mult=COLOR_EXPLOSION_MULT):
     """三阶 Greeks 是否相对建仓基线爆炸（量纲无关）
 
     Speed 为负/正都可能，取绝对值比较；Color 为负，越负代表 Gamma 随时间加速放大。
     基线缺失（None / 0 / NaN）时不判定为爆炸，避免无依据地误杀仓位。
+    Speed 阈值按期权类型区分（Put/Call 的 Speed 倍数分布相差一个数量级）。
     返回 (bool, 说明)
     """
     def _ok(v):
         return v is not None and not (isinstance(v, float) and math.isnan(v)) and abs(v) > 0
+
+    if speed_mult is None:
+        speed_mult = (SPEED_EXPLOSION_MULT_CALL if opt_type == "CALL"
+                      else SPEED_EXPLOSION_MULT_PUT)
 
     reasons = []
     if _ok(speed) and _ok(base_speed):
@@ -607,7 +618,8 @@ class PositionManager:
             print(f"  [基线] {option_symbol} Speed={speed:.3g} Color={color:.3g} "
                   f"Γ×S={gamma_norm:.3g} Vega={vega:.3g} 已记录")
         else:
-            exploded, why = greeks_exploded(speed, color, self.base_speed, self.base_color)
+            exploded, why = greeks_exploded(speed, color, self.base_speed,
+                                            self.base_color, q.option_class)
             if exploded:
                 return "HARD_EXIT", f"三阶爆炸 {why}"
 
@@ -663,7 +675,8 @@ class HardExitManager:
             time_trigger = dte <= HARD_EXIT_DTE
 
         greeks_trigger, why = greeks_exploded(
-            speed, color, base_speed, base_color)
+            speed, color, base_speed, base_color,
+            getattr(q, "option_class", None))
 
         if not (time_trigger or greeks_trigger):
             return "HOLD", (f"DTE={dte} Speed={speed} Color={color} "
