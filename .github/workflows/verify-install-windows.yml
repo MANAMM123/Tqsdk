@@ -55,10 +55,13 @@ jobs:
           Write-Host ("EXE_EXISTS=" + (Test-Path $exe))
           Write-Host ("LNK_EXISTS=" + (Test-Path $lnk))
           if (-not (Test-Path $lnk)) { throw "desktop shortcut was not created" }
+          # 中文名的 lnk 在非中文区域设置下无法被 COM 直接读取，先复制成 ASCII 名再解析
+          $probe = Join-Path $env:RUNNER_TEMP "check.lnk"
+          Copy-Item $lnk $probe -Force
           $sh = New-Object -ComObject WScript.Shell
-          $s = $sh.CreateShortcut($lnk)
+          $s = $sh.CreateShortcut($probe)
           Write-Host ("LNK_TARGET=" + $s.TargetPath)
           Write-Host ("LNK_WORKDIR=" + $s.WorkingDirectory)
           Write-Host ("LNK_ICON=" + $s.IconLocation)
-          if (-not (Test-Path $s.TargetPath)) { throw "shortcut target does not exist" }
+          if ($s.TargetPath -ne $exe) { throw "shortcut target mismatch" }
           Write-Host "INSTALL_VERIFIED"
