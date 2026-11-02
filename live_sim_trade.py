@@ -165,7 +165,7 @@ def main():
         # 买尾部保险（卖Call→买远OTM Call，卖Put→买远OTM Put）
         ins_cp = "CALL" if cp == "CALL" else "PUT"
         print(f"\n  买入尾部保险（远OTM {ins_cp}, Delta≈0.10）...")
-        ins = strategy._buy_tail_insurance(underlying, direction)
+        ins = strategy._buy_tail_insurance(underlying, direction, volume)
         if ins:
             print(f"  保险腿: {ins}")
         else:

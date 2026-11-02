@@ -53,7 +53,7 @@ from tqsdk import TqApi, TqAuth, TqSim
 from tqsdk.ta import OPTION_GREEKS, OPTION_IMPV
 
 # ============ 全局参数 ============
-INIT_BALANCE = 100000.0
+INIT_BALANCE = 1000000.0
 RISK_FREE_RATE = 0.025
 DEADLINE = 20
 
@@ -103,6 +103,7 @@ COLOR_EXPLOSION_MULT = 4.1       # Color 更负到基线 4.1x → Gamma 时间�
 # --- 风控参数（塔勒布三条建议）---
 WCD_RATIO = 0.02            # 建议2：最坏单日亏损不超过组合 2%（据此定仓位）
 MAX_POS_PER_UL = 0.15       # 建议3：单品种保证金占比上限 15%
+MARGIN_ESTIMATE_BUFFER = 1.25  # 保证金预估安全系数（实测估算值偏低约11%，留25%余量）
 MAX_TOTAL_SELL_MARGIN = 0.40  # 总卖方保证金占比上限 40%
 INSURANCE_BUDGET_RATIO = 0.0333  # 尾部保险预算占净值比例
 
@@ -249,10 +250,13 @@ def estimate_short_option_margin(premium, volume_multiple, fut_margin_per_lot,
 
 
 def cap_volume_by_margin(volume, per_lot_margin, equity):
-    """建议3：单品种保证金占比 ≤ MAX_POS_PER_UL，返回可用手数"""
+    """建议3：单品种保证金占比 ≤ MAX_POS_PER_UL，返回可用手数
+
+    预估保证金偏低，故按 MARGIN_ESTIMATE_BUFFER 留安全余量。
+    """
     if not per_lot_margin or per_lot_margin <= 0:
         return volume
-    max_lots = int(equity * MAX_POS_PER_UL / per_lot_margin)
+    max_lots = int(equity * MAX_POS_PER_UL / (per_lot_margin * MARGIN_ESTIMATE_BUFFER))
     return min(volume, max_lots)
 
 
@@ -817,7 +821,7 @@ class SellerGreeksSystem:
         self._log("ENTRY_SELL", sym,
                   f"手数={volume} 权利金={entry_price} IV溢价={best['iv_premium']*100:.1f}% WCD手数")
         # 5. 买尾部保险（杠铃，建议1）
-        ins = self._buy_tail_insurance(underlying, direction)
+        ins = self._buy_tail_insurance(underlying, direction, volume)
         if ins:
             self._log("ENTRY_INSURANCE", ins, "尾部对冲")
         # 6. 记录持仓
@@ -834,8 +838,11 @@ class SellerGreeksSystem:
         if base:
             self._log("GREEKS_BASELINE", sym, f"Speed={base[0]:.3g} Color={base[1]:.3g}")
 
-    def _buy_tail_insurance(self, underlying, direction="LONG"):
-        """买入尾部保险腿：卖Put(LONG)→买远OTM Put；卖Call(SHORT)→买远OTM Call"""
+    def _buy_tail_insurance(self, underlying, direction="LONG", volume=1):
+        """买入尾部保险腿：卖Put(LONG)→买远OTM Put；卖Call(SHORT)→买远OTM Call
+
+        保险手数与卖方仓位同比例（1:1 覆盖尾部），并受保险预算约束。
+        """
         cp = "PUT" if direction == "LONG" else "CALL"
         opts = self.api.query_options(underlying, expired=False)
         ul_q = self.api.get_quote(underlying)
@@ -862,10 +869,19 @@ class SellerGreeksSystem:
         if best:
             lp = get_limit_price(self.api, best, "BUY")
             if lp:
+                bq = self.api.get_quote(best)
+                wait(self.api, deadline=5)
+                mult = bq.volume_multiple or 10
+                cost_per_lot = lp * mult
+                budget = INIT_BALANCE * INSURANCE_BUDGET_RATIO
+                lots = min(volume, int(budget / cost_per_lot)) if cost_per_lot > 0 else 0
+                if lots <= 0:
+                    print(f"  保险预算不足：1手≈{cost_per_lot:,.0f} > 预算{budget:,.0f}")
+                    return None
                 self.api.insert_order(best, direction="BUY", offset="OPEN",
-                                      volume=1, limit_price=lp)
+                                      volume=lots, limit_price=lp)
                 wait(self.api, deadline=8)
-                return best
+                return f"{best} x{lots}"
         return None
 
     def stage_two_manage(self):

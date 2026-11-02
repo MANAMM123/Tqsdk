@@ -57,7 +57,7 @@ from tqsdk import TqApi, TqAuth, TqSim
 # 交易所列表（品种动态发现，不硬编码）
 SCAN_EXCHANGES = ["SHFE", "DCE", "CZCE", "GFEX"]
 
-INIT_BALANCE = 100000.0          # 模拟账户初始资金
+INIT_BALANCE = 1000000.0         # 模拟账户初始资金
 HV_LOOKBACK = 20                 # 历史波动率回看天数
 MAX_OPTIONS_PER_UL = 12          # 每个标的扫描最接近 ATM 的期权数
 SELL_IV_PREMIUM_THRESHOLD = 0.15  # IV 溢价阈值，高于此才考虑卖
