@@ -276,8 +276,11 @@ def taleb_verdict(rec):
     return "HOLD", f"IV 溢价 {ivp*100:.1f}%"
 
 
-def select_insurance(api, ul_sym, cp="PUT", target_delta=INSURANCE_DELTA):
-    """选远 OTM 保险腿：卖Put配Put，卖Call配Call（Delta 最接近 target_delta）"""
+def select_insurance(api, ul_sym, cp="PUT", target_delta=INSURANCE_DELTA, sold_strike=None):
+    """选远 OTM 保险腿：卖Put配Put，卖Call配Call（Delta 最接近 target_delta）
+
+    sold_strike 给定时只选比卖出腿更远 OTM 的行权价，避免对冲净额为 0。
+    """
     opts = api.query_options(ul_sym, expired=False)
     if not opts:
         return None
@@ -292,6 +295,11 @@ def select_insurance(api, ul_sym, cp="PUT", target_delta=INSURANCE_DELTA):
         q = api.get_quote(o)
         wait(api)
         K = q.strike_price
+        if sold_strike:
+            if cp == "PUT" and K >= sold_strike:
+                continue
+            if cp == "CALL" and K <= sold_strike:
+                continue
         T = (q.expire_rest_days or 0) / 365.0
         price = get_option_price(q)
         if not S or not K or not price or T <= 0:
@@ -357,7 +365,7 @@ def build_portfolio(api, sell_candidates, insurance_budget):
                                      offset="OPEN", volume=vol, limit_price=limit)
             wait(api, deadline=8)
             orders.append(("SELL_OPEN", rec["symbol"], rec["ul"],
-                           rec["iv_premium"], order, vol, rec["type"]))
+                           rec["iv_premium"], order, vol, rec["type"], rec["strike"]))
             print(f"  [下单] 卖开 {rec['symbol']} {vol}手  限价={limit}  "
                   f"IV溢价={rec['iv_premium']*100:.1f}%")
         except Exception as e:
@@ -368,9 +376,9 @@ def build_portfolio(api, sell_candidates, insurance_budget):
     sell_legs = [x for x in orders if x[0] == "SELL_OPEN"]
     budget_per_leg = insurance_budget / max(len(sell_legs), 1)
     for o in sell_legs:
-        _, sym, ul_sym, ivp, _, sell_vol, otype = o
+        _, sym, ul_sym, ivp, _, sell_vol, otype, sold_strike = o
         cp = "PUT" if otype == "PUT" else "CALL"
-        ins = select_insurance(api, ul_sym, cp)
+        ins = select_insurance(api, ul_sym, cp, sold_strike=sold_strike)
         if not ins:
             print(f"  [保险] {ul_sym} 无合适远 OTM {cp}")
             continue

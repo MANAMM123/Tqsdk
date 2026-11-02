@@ -60,8 +60,11 @@ def main():
         direction = chan_second_buy(api, underlying)
         print(f"  缠论判定方向: {direction}")
         if direction is None:
-            print("  当前无明确二买信号，仅演示流程（仍继续后续步骤）")
-            direction = "LONG"  # 演示用：假设上涨方向卖Put
+            if "--demo" not in sys.argv:
+                print("  无明确二买信号，按纪律不开仓（如需演示流程加 --demo）")
+                return
+            print("  --demo：无信号，仅演示流程，假设上涨方向卖Put")
+            direction = "LONG"
 
         # ===== 2. 建仓筛选 =====
         print("\n" + "=" * 60)
@@ -165,7 +168,8 @@ def main():
         # 买尾部保险（卖Call→买远OTM Call，卖Put→买远OTM Put）
         ins_cp = "CALL" if cp == "CALL" else "PUT"
         print(f"\n  买入尾部保险（远OTM {ins_cp}, Delta≈0.10）...")
-        ins = strategy._buy_tail_insurance(underlying, direction, volume)
+        ins = strategy._buy_tail_insurance(underlying, direction, volume,
+                                           sold_strike=oq.strike_price)
         if ins:
             print(f"  保险腿: {ins}")
         else:
@@ -214,6 +218,10 @@ def main():
         print("=" * 60)
         for r in strategy.trade_log:
             print(f"  {r['time'][:19]} {r['action']:15s} {r['symbol']:25s} {r['detail']}")
+
+        # ===== 5. 常驻监控：交易时段每 30 秒检查，非交易时段休眠 =====
+        if strategy.positions:
+            strategy.monitor_forever(interval=30)
 
     finally:
         api.close()

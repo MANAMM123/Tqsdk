@@ -44,11 +44,12 @@ import os
 import sys
 import math
 import json
+import time
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
 from scipy.optimize import brentq
-from datetime import datetime
+from datetime import datetime, time as dtime
 from tqsdk import TqApi, TqAuth, TqSim
 from tqsdk.ta import OPTION_GREEKS, OPTION_IMPV
 
@@ -821,7 +822,8 @@ class SellerGreeksSystem:
         self._log("ENTRY_SELL", sym,
                   f"手数={volume} 权利金={entry_price} IV溢价={best['iv_premium']*100:.1f}% WCD手数")
         # 5. 买尾部保险（杠铃，建议1）
-        ins = self._buy_tail_insurance(underlying, direction, volume)
+        ins = self._buy_tail_insurance(underlying, direction, volume,
+                                       sold_strike=oq.strike_price)
         if ins:
             self._log("ENTRY_INSURANCE", ins, "尾部对冲")
         # 6. 记录持仓
@@ -838,9 +840,10 @@ class SellerGreeksSystem:
         if base:
             self._log("GREEKS_BASELINE", sym, f"Speed={base[0]:.3g} Color={base[1]:.3g}")
 
-    def _buy_tail_insurance(self, underlying, direction="LONG", volume=1):
+    def _buy_tail_insurance(self, underlying, direction="LONG", volume=1, sold_strike=None):
         """买入尾部保险腿：卖Put(LONG)→买远OTM Put；卖Call(SHORT)→买远OTM Call
 
+        只选比卖出腿更远 OTM 的行权价，避免买回同行使价导致对冲净额为 0。
         保险手数与卖方仓位同比例（1:1 覆盖尾部），并受保险预算约束。
         """
         cp = "PUT" if direction == "LONG" else "CALL"
@@ -855,6 +858,11 @@ class SellerGreeksSystem:
             if q.option_class != cp:
                 continue
             K = q.strike_price
+            if sold_strike:
+                if cp == "PUT" and K >= sold_strike:
+                    continue
+                if cp == "CALL" and K <= sold_strike:
+                    continue
             T = (q.expire_rest_days or 0) / 365.0
             price = get_price(q)
             if not all([S, K, price, T > 0]):
@@ -889,7 +897,7 @@ class SellerGreeksSystem:
         for sym, pos in list(self.positions.items()):
             action, reason = pos["manager"].monitor(sym)
             q = self.api.get_quote(sym)
-            wait(self.api)
+            wait(self.api, deadline=3)
             dte = q.expire_rest_days or 0
             # DTE 阶段标记（仅用于日志，风控以 Greeks 阶数为准）
             if dte <= HARD_EXIT_DTE:
@@ -909,9 +917,9 @@ class SellerGreeksSystem:
         """硬退出检查：DTE ≤ 10 或 三阶 Greeks 爆炸"""
         for sym, pos in list(self.positions.items()):
             q = self.api.get_quote(sym)
-            wait(self.api)
+            wait(self.api, deadline=3)
             ul_q = self.api.get_quote(q.underlying_symbol)
-            wait(self.api)
+            wait(self.api, deadline=3)
             S = get_price(ul_q)
             K = q.strike_price
             T = (q.expire_rest_days or 0) / 365.0
@@ -939,16 +947,61 @@ class SellerGreeksSystem:
         self._log(action, sym, reason)
         del self.positions[sym]
 
-    def run_cycle(self, underlying, direction):
-        """运行一个完整周期：建仓(35-15DTE) → 管理(15-10DTE) → 硬止盈止损(≤10DTE)"""
-        self.stage_one_entry(underlying, direction)
-        # 持仓循环
-        for _ in range(10):
-            wait(self.api)
+    @staticmethod
+    def _parse_sessions(tt):
+        """把 trading_time 的 'HH:MM-HH:MM' 段解析成时间区间"""
+        segs = []
+        if isinstance(tt, dict):
+            for key in ("day", "night"):
+                for s in tt.get(key) or []:
+                    try:
+                        a, b = str(s).split("-")
+                        segs.append((dtime.fromisoformat(a.strip()),
+                                     dtime.fromisoformat(b.strip())))
+                    except Exception:
+                        continue
+        return segs
+
+    def _in_trading_hours(self):
+        """按持仓合约的 trading_time 判断当前是否在交易时段"""
+        now = datetime.now().time()
+        fallback = [(dtime(9, 0), dtime(11, 30)),
+                    (dtime(13, 30), dtime(15, 0)),
+                    (dtime(21, 0), dtime(23, 0))]
+        for sym in self.positions:
+            q = self.api.get_quote(sym)
+            segs = self._parse_sessions(getattr(q, "trading_time", None)) or fallback
+            for a, b in segs:
+                if a <= b:
+                    if a <= now <= b:
+                        return True
+                elif now >= a or now <= b:  # 跨午夜，如 21:00-02:30
+                    return True
+        return False
+
+    def monitor_forever(self, interval=30):
+        """常驻监控：交易时段每 interval 秒检查一次，非交易时段休眠。"""
+        print(f"[monitor] 启动：间隔 {interval}s，仅交易时段检查 {len(self.positions)} 个持仓")
+        next_check = time.monotonic()
+        while self.positions:
+            if not self._in_trading_hours():
+                self.api.wait_update(deadline=60)
+                next_check = time.monotonic()
+                continue
+            now = time.monotonic()
+            if now < next_check:
+                self.api.wait_update(deadline=min(5.0, max(0.5, next_check - now)))
+                continue
+            print(f"[monitor] {datetime.now():%H:%M:%S} 检查 {len(self.positions)} 个持仓")
             self.stage_two_manage()
             self.stage_three_hard_exit()
-            if not self.positions:
-                break
+            next_check = time.monotonic() + interval
+        print("[monitor] 持仓已清空，监控结束")
+
+    def run_cycle(self, underlying, direction):
+        """运行一个完整周期：建仓(35-15DTE) → 常驻监控（交易时段每30秒，DTE≤10或被三阶Greeks爆炸则平仓）"""
+        self.stage_one_entry(underlying, direction)
+        self.monitor_forever(interval=30)
 
 
 # ============ 主入口 ============
