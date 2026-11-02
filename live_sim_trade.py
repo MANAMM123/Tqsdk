@@ -13,9 +13,10 @@
 """
 
 import os
+import re
 import sys
 from datetime import datetime
-from tqsdk import TqApi, TqAuth, TqSim
+from tqsdk import TqApi, TqAuth
 
 sys.path.insert(0, "/workspace")
 from seller_greeks_system import (
@@ -24,7 +25,37 @@ from seller_greeks_system import (
     option_greeks_full, implied_vol, RISK_FREE_RATE, get_price,
     get_limit_price, wait, WCD_RATIO, PositionManager,
     estimate_short_option_margin, cap_volume_by_margin,
+    create_account, account_equity,
 )
+
+
+def resume_existing_positions(api, strategy):
+    """TqKq 重启恢复：接管账户里已有的期权空头持仓，继续 30 秒监控"""
+    resumed = 0
+    for sym, p in api.get_position().items():
+        if p.pos_short <= 0:
+            continue
+        code = sym.split(".")[-1]
+        if not re.search(r"[CP]\d", code):
+            continue
+        q = api.get_quote(sym)
+        wait(api, deadline=3)
+        entry = p.open_price or get_price(q)
+        if not entry or entry <= 0:
+            continue
+        direction = "LONG" if q.option_class == "PUT" else "SHORT"
+        pm = PositionManager(api, entry)
+        pm.capture_baseline(sym)
+        strategy.positions[sym] = {
+            "entry_premium": entry,
+            "manager": pm,
+            "stage": 2,
+            "direction": direction,
+            "volume": p.pos_short,
+        }
+        resumed += 1
+        print(f"  恢复持仓 {sym}: 空{p.pos_short}手 开仓价={entry} 方向={direction}")
+    return resumed
 
 
 def main():
@@ -34,12 +65,21 @@ def main():
         print("错误：请设置 TQ_ACCOUNT 和 TQ_PASSWORD")
         sys.exit(1)
 
-    print(f"[{datetime.now()}] 连接实盘行情 + TqSim(初始资金 {INIT_BALANCE:,.0f})")
-    api = TqApi(account=TqSim(init_balance=INIT_BALANCE),
-                auth=TqAuth(account, password))
+    acct_type = os.environ.get("TQ_ACCOUNT_TYPE", "kq")
+    print(f"[{datetime.now()}] 连接实盘行情 + 账户类型 {acct_type}")
+    api = TqApi(account=create_account(), auth=TqAuth(account, password))
     try:
+        # ===== 0. 重启恢复：TqKq 持仓在服务端，先接管已有空头再决定是否新开 =====
+        api.wait_update(deadline=10)
+        strategy = SellerGreeksSystem(api)
+        acc0 = api.get_account()
+        print(f"[{datetime.now()}] 账户权益 {acc0.balance:,.0f}  可用 {acc0.available:,.0f}")
+        if resume_existing_positions(api, strategy):
+            print("检测到账户已有期权空头，接管并进入常驻监控（不再新开仓）")
+            strategy.monitor_forever(interval=30)
+            return
+
         # 选标的：默认 SHFE.cu（当前 2612 系列期权 DTE≈22，在 15-35 建仓窗口）
-        import re
         target = sys.argv[1] if len(sys.argv) > 1 else "SHFE.cu"
         if target.startswith("KQ.") or re.search(r'\d', target):
             quote_sym = target
@@ -137,7 +177,7 @@ def main():
         print("\n" + "=" * 60)
         print("【步骤3】WCD定仓位 → 卖开 → 尾部保险（杠铃）")
         print("=" * 60)
-        strategy = SellerGreeksSystem(api)
+        # strategy 已在步骤0创建
         # 直接调用 stage_one_entry 会重新跑缠论；这里手动执行核心逻辑
         oq = api.get_quote(sym)
         wait(api, deadline=8)
@@ -150,9 +190,10 @@ def main():
         per_lot = estimate_short_option_margin(
             entry_price, vol_mult, getattr(ul_q, "margin", None),
             oq.strike_price, S, cp)
-        capped = cap_volume_by_margin(volume, per_lot, INIT_BALANCE)
+        equity = account_equity(api)
+        capped = cap_volume_by_margin(volume, per_lot, equity)
         if per_lot:
-            print(f"  单手卖方保证金≈{per_lot:,.0f} ({per_lot/INIT_BALANCE*100:.1f}%权益)")
+            print(f"  单手卖方保证金≈{per_lot:,.0f} ({per_lot/equity*100:.1f}%权益)")
         if capped != volume:
             print(f"  集中度上限(15%)：手数 {volume}→{capped}")
         volume = capped

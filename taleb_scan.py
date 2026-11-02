@@ -55,6 +55,7 @@ from tqsdk import TqApi, TqAuth, TqSim
 
 from seller_greeks_system import (
     WCD_RATIO, estimate_short_option_margin, cap_volume_by_margin,
+    create_account, account_equity,
 )
 
 # ============ 配置 ============
@@ -345,8 +346,9 @@ def build_portfolio(api, sell_candidates, insurance_budget):
             print(f"  [跳过] {rec['symbol']} 无可用限价")
             continue
         mult = api.get_quote(rec["symbol"]).volume_multiple or 10
-        # 建议2：WCD 定仓
-        wcd_vol = int(INIT_BALANCE * WCD_RATIO / (limit * 2 * mult))
+        # 建议2：WCD 定仓（按账户实际权益）
+        equity = account_equity(api)
+        wcd_vol = int(equity * WCD_RATIO / (limit * 2 * mult))
         if wcd_vol < 1:
             print(f"  [跳过] {rec['symbol']} 单笔WCD超限")
             continue
@@ -356,7 +358,7 @@ def build_portfolio(api, sell_candidates, insurance_budget):
         per_lot = estimate_short_option_margin(
             limit, mult, getattr(ul_q, "margin", None),
             rec["strike"], rec["ul_price"], rec["type"])
-        vol = cap_volume_by_margin(wcd_vol, per_lot, INIT_BALANCE)
+        vol = cap_volume_by_margin(wcd_vol, per_lot, equity)
         if vol <= 0:
             print(f"  [跳过] {rec['symbol']} 集中度超限（单手≈{per_lot:,.0f}）")
             continue
@@ -411,9 +413,9 @@ def main():
         print("错误：请设置 TQ_ACCOUNT 和 TQ_PASSWORD 环境变量")
         sys.exit(1)
 
-    print(f"[{datetime.now()}] 连接天勤，模拟账户初始资金 {INIT_BALANCE:,.0f} 元")
-    api = TqApi(account=TqSim(init_balance=INIT_BALANCE),
-                auth=TqAuth(account, password))
+    acct_type = os.environ.get("TQ_ACCOUNT_TYPE", "kq")
+    print(f"[{datetime.now()}] 连接天勤，账户类型 {acct_type}")
+    api = TqApi(account=create_account(), auth=TqAuth(account, password))
     results = []
     try:
         # 动态发现全部有期权的品种（不硬编码）

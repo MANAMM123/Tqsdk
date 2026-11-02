@@ -235,6 +235,30 @@ def wait(api, deadline=DEADLINE):
     api.wait_update(deadline=deadline)
 
 
+def create_account():
+    """账户工厂：默认 TqKq 快期模拟（持仓/资金服务端持久化）；
+    TQ_ACCOUNT_TYPE=sim 时退回 TqSim 内存模拟。
+    """
+    kind = os.environ.get("TQ_ACCOUNT_TYPE", "kq").strip().lower()
+    if kind in ("kq", "tqkq"):
+        from tqsdk import TqKq
+        return TqKq()
+    if kind in ("sim", "tqsim"):
+        return TqSim(init_balance=INIT_BALANCE)
+    raise ValueError(f"未知 TQ_ACCOUNT_TYPE={kind}（可选 kq / sim）")
+
+
+def account_equity(api, default=None):
+    """读取账户权益；失败时退回默认资金（TqSim 用 INIT_BALANCE）"""
+    try:
+        bal = api.get_account().balance
+        if bal and bal > 0:
+            return float(bal)
+    except Exception:
+        pass
+    return float(default or INIT_BALANCE)
+
+
 def estimate_short_option_margin(premium, volume_multiple, fut_margin_per_lot,
                                  strike, S, opt_type):
     """估算单手卖方保证金（交易所通用公式近似）
@@ -750,7 +774,7 @@ class SellerGreeksSystem:
         若 1 手已超限，返回 0（跳过该笔交易）。
         """
         wcd_loss_per_lot = entry_price * 2 * volume_multiple  # 单腿最坏日亏
-        max_allowed = INIT_BALANCE * WCD_RATIO
+        max_allowed = account_equity(self.api) * WCD_RATIO
         if wcd_loss_per_lot > max_allowed:
             return 0  # 单笔风险超限，不开仓
         vol = int(max_allowed / wcd_loss_per_lot)
@@ -806,13 +830,14 @@ class SellerGreeksSystem:
         per_lot = estimate_short_option_margin(
             entry_price, vol_mult, getattr(ul_q, "margin", None),
             oq.strike_price, S, "PUT" if direction == "LONG" else "CALL")
-        capped = cap_volume_by_margin(volume, per_lot, INIT_BALANCE)
+        equity = account_equity(self.api)
+        capped = cap_volume_by_margin(volume, per_lot, equity)
         if per_lot and capped != volume:
             print(f"  集中度上限：单手保证金≈{per_lot:,.0f} "
-                  f"({per_lot/INIT_BALANCE*100:.1f}%) → 手数 {volume}→{capped}")
+                  f"({per_lot/equity*100:.1f}%) → 手数 {volume}→{capped}")
         if capped <= 0:
             print(f"  集中度超限：单手保证金≈{per_lot:,.0f} "
-                  f"({per_lot/INIT_BALANCE*100:.1f}%) > {MAX_POS_PER_UL*100:.0f}%，跳过")
+                  f"({per_lot/equity*100:.1f}%) > {MAX_POS_PER_UL*100:.0f}%，跳过")
             return
         volume = capped
         # 4. 开仓（卖方）
@@ -881,7 +906,7 @@ class SellerGreeksSystem:
                 wait(self.api, deadline=5)
                 mult = bq.volume_multiple or 10
                 cost_per_lot = lp * mult
-                budget = INIT_BALANCE * INSURANCE_BUDGET_RATIO
+                budget = account_equity(self.api) * INSURANCE_BUDGET_RATIO
                 lots = min(volume, int(budget / cost_per_lot)) if cost_per_lot > 0 else 0
                 if lots <= 0:
                     print(f"  保险预算不足：1手≈{cost_per_lot:,.0f} > 预算{budget:,.0f}")
@@ -1012,9 +1037,8 @@ def main():
         print("错误：请设置 TQ_ACCOUNT 和 TQ_PASSWORD")
         sys.exit(1)
 
-    print(f"[{datetime.now()}] 卖方三阶段 Greeks 系统启动，资金 {INIT_BALANCE:,.0f}")
-    api = TqApi(account=TqSim(init_balance=INIT_BALANCE),
-                auth=TqAuth(account, password))
+    print(f"[{datetime.now()}] 卖方三阶段 Greeks 系统启动，账户类型 {os.environ.get('TQ_ACCOUNT_TYPE','kq')}")
+    api = TqApi(account=create_account(), auth=TqAuth(account, password))
     try:
         sys = SellerGreeksSystem(api)
         # 示例：对螺纹钢主力做上涨方向卖Put

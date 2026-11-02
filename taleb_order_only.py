@@ -4,8 +4,9 @@
 import os
 import sys
 import pandas as pd
-from tqsdk import TqApi, TqAuth, TqSim
-from taleb_scan import build_portfolio, INSURANCE_BUDGET_RATIO, INIT_BALANCE, wait
+from tqsdk import TqApi, TqAuth
+from taleb_scan import build_portfolio, INSURANCE_BUDGET_RATIO, wait
+from seller_greeks_system import create_account
 
 account = os.environ.get("TQ_ACCOUNT", "")
 password = os.environ.get("TQ_PASSWORD", "")
@@ -14,7 +15,7 @@ df = pd.read_csv("/workspace/taleb_scan_result.csv")
 sellable = df[df["verdict"] == "SELL_WITH_HEDGE"].to_dict("records")
 print(f"可收租候选 {len(sellable)} 个")
 
-api = TqApi(account=TqSim(init_balance=INIT_BALANCE), auth=TqAuth(account, password))
+api = TqApi(account=create_account(), auth=TqAuth(account, password))
 try:
     acc = api.get_account()
     wait(api)
