@@ -148,8 +148,8 @@ class Engine(threading.Thread):
 
         self.notify("status", f"加载 {len(symbols)} 个合约的静态信息…")
         frames = []
-        for i in range(0, len(symbols), 3000):
-            chunk = symbols[i:i + 3000]
+        for i in range(0, len(symbols), 1000):
+            chunk = symbols[i:i + 1000]
             frames.append(pd.DataFrame(api.query_symbol_info(chunk)))
         info = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         df = self._normalize_info(info)
