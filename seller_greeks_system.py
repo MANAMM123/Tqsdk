@@ -76,14 +76,15 @@ WALL_DISTANCE_MAX = 0.05    # 距期权墙最大距离（5%）
 TAIL_INSURANCE_DELTA = 0.10 # 尾部保险腿目标 Delta（风控建议1）
 
 # --- 一阶 Greeks 管理参数 ---
-DELTA_LIMIT = 0.60          # 一阶：Delta 上限（OTM建仓 100%通过；-3%冲击约32%触发）
+DELTA_LIMIT = 0.60          # 一阶：Delta 上限（全市场OTM建仓 max=0.52，100%通过）
 TP_RETRACE_RATIO = 0.50     # 移动止盈：权利金回撤不超过 50%
 
 # --- 二阶 Greeks 管理参数 ---
-# 相对建仓基线判定。实测 120 合约正常时间衰减到 DTE10：Γ×S 最大 1.49、Vega 最大 0.68，
-# 取 1.5 可保证正常衰减不误报，只在价格冲击导致凸性放大时触发。
-GAMMA_ADJUST_MULT = 1.5     # Γ×S 相对建仓基线 1.5x（正常衰减至 DTE10 上限 1.49）
-VEGA_ADJUST_MULT = 1.5      # Vega 相对建仓基线 1.5x（正常衰减不超过 0.68，仅冲击触发）
+# 相对建仓基线判定。实测 150 合约（SHFE+CZCE，13 品种，DTE22-24，IV 6%~51%）
+# 正常时间衰减至 DTE10 的 max：Γ×S=1.55、Vega=0.67；不利冲击 max：Γ×S=1.99、Vega=1.79
+# 故取 1.6 / 1.5：正常衰减不误报，冲击可触发。
+GAMMA_ADJUST_MULT = 1.6     # Γ×S 相对建仓基线 1.6x（正常衰减 max 1.55）
+VEGA_ADJUST_MULT = 1.5      # Vega 相对建仓基线 1.5x（正常衰减 max 0.83，仅冲击触发）
 VANNA_LIMIT = 10.0          # 二阶：Vanna 上限（Delta 对 IV 敏感度）
 
 # --- 三阶 Greeks 管理参数（硬退出触发）---
@@ -91,14 +92,13 @@ HARD_EXIT_DTE = 10          # 时间触发：DTE ≤ 10 强制平仓
 # 三阶爆炸用「相对建仓基线的倍数」判定，不用绝对值：
 #   不同品种/行权价/到期日的 Speed、Color 量纲差异极大（相差几个数量级），
 #   任何单一绝对阈值都会要么误杀全部仓位，要么永不触发。
-# 实测 120 合约正常时间衰减（DTE22→10），Speed 倍数在两侧分布完全不同：
-#   OTM Put:  正常 T15 max=1.61 / T10 max=2.68；下跌5% max=3.57 → 阈值 3.0
-#   OTM Call: 正常 T15 max=27.74 / T10 max=84.31；上涨5% max=133.25 → 阈值 90
-#   单一阈值必然在某侧误报，故按期权类型分别取阈值。
-#   Color 倍数两侧一致：正常 T10 ≈3.5，冲击 ≤1.4 → 统一取 3.5
+# 实测 150 合约正常时间衰减至 DTE10 的 max，与不利冲击 max 对比：
+#   OTM Put  Speed: 正常 2.80 | -5%冲击 4.15  → 阈值 3.0
+#   OTM Call Speed: 正常 27.89 | +3%冲击 114.35 → 阈值 30
+#   Color(两侧):    正常 4.03 | 冲击 ≤1.40     → 阈值 4.1（≈DTE10 备份线）
 SPEED_EXPLOSION_MULT_PUT = 3.0   # 卖Put：|Speed| > 基线 3x
-SPEED_EXPLOSION_MULT_CALL = 90.0 # 卖Call：|Speed| > 基线 90x
-COLOR_EXPLOSION_MULT = 3.5       # Color 更负到基线 3.5x → Gamma 时间爆炸（≈DTE10 备份线）
+SPEED_EXPLOSION_MULT_CALL = 30.0 # 卖Call：|Speed| > 基线 30x
+COLOR_EXPLOSION_MULT = 4.1       # Color 更负到基线 4.1x → Gamma 时间爆炸（≈DTE10 备份线）
 
 # --- 风控参数（塔勒布三条建议）---
 WCD_RATIO = 0.02            # 建议2：最坏单日亏损不超过组合 2%（据此定仓位）

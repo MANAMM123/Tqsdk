@@ -97,7 +97,7 @@ def test_hard_exit_logic():
     for dte, price, speed, color, expected in [
         (22, 150, -1e-6, -2e-3, "HOLD"),        # 未爆炸
         (22, 150, -5e-6, -2e-3, "HARD_TP"),     # DTE>10，Speed 5x 爆炸（浮盈）
-        (22, 250, -1e-6, -8e-3, "HARD_STOP"),   # DTE>10，Color 4x 爆炸（浮亏）
+        (22, 250, -1e-6, -1.0e-2, "HARD_STOP"),  # DTE>10，Color 5x 爆炸（浮亏）
         (8,  150, -1e-6, -2e-3, "HARD_TP"),     # DTE≤10 时间触发
         (8,  150, -5e-6, -8e-3, "HARD_TP"),     # 双条件同时满足
     ]:
