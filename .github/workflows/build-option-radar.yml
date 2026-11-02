@@ -1,12 +1,12 @@
-name: Build OptionRadar Windows EXE
+name: Release OptionRadar Windows EXE
 
 on:
   push:
-    branches: [main, feature/option-radar]
-    paths:
-      - "option_radar/**"
-      - ".github/workflows/build-option-radar.yml"
+    tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -31,9 +31,19 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller --noconfirm --windowed --name OptionRadar --collect-submodules scipy._external.array_api_compat app.py
 
-      - name: Upload EXE
+      - name: Package zip
+        run: Compress-Archive -Path dist/OptionRadar -DestinationPath OptionRadar-Windows.zip
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: OptionRadar-Windows
-          path: option_radar/dist/OptionRadar
+          path: option_radar/OptionRadar-Windows.zip
           if-no-files-found: error
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: option_radar/OptionRadar-Windows.zip
+          generate_release_notes: true
