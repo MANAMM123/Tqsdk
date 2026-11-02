@@ -1,0 +1,39 @@
+name: Build OptionRadar Windows EXE
+
+on:
+  push:
+    branches: [main, feature/option-radar]
+    paths:
+      - "option_radar/**"
+      - ".github/workflows/build-option-radar.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: option_radar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm --windowed --name OptionRadar --collect-submodules scipy._external.array_api_compat app.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: OptionRadar-Windows
+          path: option_radar/dist/OptionRadar
+          if-no-files-found: error
