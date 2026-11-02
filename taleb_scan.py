@@ -7,7 +7,7 @@
 【关于 TqSdk】
 TqSdk 是信易科技开源的 Python 量化交易开发包，面向国内期货、期权、股票市场，
 提供实时行情、K 线数据、历史回测、模拟交易和实盘交易等能力。
-本脚本使用 TqApi 获取行情，用 TqSim 模拟账户（初始资金 100,000 元）演示扫描与下单逻辑。
+本脚本使用 TqApi 获取行情，用 TqSim 模拟账户（初始资金 1,000,000 元）演示扫描与下单逻辑。
 运行前需把 TQ_ACCOUNT / TQ_PASSWORD 环境变量替换为自己的快期账户信息。
 
 【策略思路】
@@ -26,11 +26,11 @@ TqSdk 是信易科技开源的 Python 量化交易开发包，面向国内期货
   3. 尾部与生存：是否深 OTM(尾部赔付倍数大)、IV 折价(卖了更危险)。
   4. 历史类比：低 IV 环境是脆弱信号(calm before storm)。
 
-杠铃组合（100,000 元）：
-  - 安全端：约 93,000 元留作现金/保证金缓冲
+杠铃组合（1,000,000 元）：
+  - 安全端：约 93% 留作现金/保证金缓冲
   - 收租端：卖出 IV 显著溢价、接近 ATM 的期权（线性、贵得可证）
-  - 保险端：买入同标的远 OTM put（Delta≈0.10）做尾部对冲
-  - 单笔收租名义保证金不超过组合 5%；保险预算约 3.3%
+  - 保险端：卖Put配远 OTM put、卖Call配远 OTM call（Delta≈0.10）做尾部对冲
+  - 单品种收租保证金 ≤ 组合 15%；保险预算约 3.3%
 
 【运行说明】
 1. pip install tqsdk scipy numpy pandas
@@ -52,6 +52,10 @@ from scipy.stats import norm
 from scipy.optimize import brentq
 from datetime import datetime
 from tqsdk import TqApi, TqAuth, TqSim
+
+from seller_greeks_system import (
+    WCD_RATIO, estimate_short_option_margin, cap_volume_by_margin,
+)
 
 # ============ 配置 ============
 # 交易所列表（品种动态发现，不硬编码）
@@ -272,8 +276,8 @@ def taleb_verdict(rec):
     return "HOLD", f"IV 溢价 {ivp*100:.1f}%"
 
 
-def select_insurance_put(api, ul_sym, target_delta=INSURANCE_DELTA):
-    """在同标的上选远 OTM put 做尾部保险（Delta 最接近 target_delta）"""
+def select_insurance(api, ul_sym, cp="PUT", target_delta=INSURANCE_DELTA):
+    """选远 OTM 保险腿：卖Put配Put，卖Call配Call（Delta 最接近 target_delta）"""
     opts = api.query_options(ul_sym, expired=False)
     if not opts:
         return None
@@ -283,7 +287,7 @@ def select_insurance_put(api, ul_sym, target_delta=INSURANCE_DELTA):
     best = None
     best_diff = 1.0
     for o in opts:
-        if "P" not in o.split(".")[-1]:
+        if cp[0] not in o.split(".")[-1]:
             continue
         q = api.get_quote(o)
         wait(api)
@@ -292,10 +296,10 @@ def select_insurance_put(api, ul_sym, target_delta=INSURANCE_DELTA):
         price = get_option_price(q)
         if not S or not K or not price or T <= 0:
             continue
-        iv = implied_vol(price, S, K, T, RISK_FREE_RATE, "PUT")
+        iv = implied_vol(price, S, K, T, RISK_FREE_RATE, cp)
         if iv is None:
             continue
-        delta, _, _ = option_greeks(S, K, T, RISK_FREE_RATE, iv, "PUT")
+        delta, _, _ = option_greeks(S, K, T, RISK_FREE_RATE, iv, cp)
         diff = abs(abs(delta) - target_delta)
         if diff < best_diff:
             best_diff = diff
@@ -319,9 +323,9 @@ def get_limit_price(api, symbol, direction):
 
 # ============ 下单逻辑 ============
 def build_portfolio(api, sell_candidates, insurance_budget):
-    """根据扫描结果构建杠铃组合并下达模拟单"""
+    """根据扫描结果构建杠铃组合并下达模拟单（WCD 定仓 + 单品种 15% 保证金上限）"""
     orders = []
-    # 收租端：选 IV 溢价最高的 1-2 个，卖 1 手（限价单，上期所等不支持市价单）
+    # 收租端：选 IV 溢价最高的 1-2 个标的
     sell_candidates = sorted(sell_candidates, key=lambda x: x["iv_premium"], reverse=True)
     seen_ul = set()
     for rec in sell_candidates:
@@ -332,25 +336,49 @@ def build_portfolio(api, sell_candidates, insurance_budget):
         if not limit:
             print(f"  [跳过] {rec['symbol']} 无可用限价")
             continue
+        mult = api.get_quote(rec["symbol"]).volume_multiple or 10
+        # 建议2：WCD 定仓
+        wcd_vol = int(INIT_BALANCE * WCD_RATIO / (limit * 2 * mult))
+        if wcd_vol < 1:
+            print(f"  [跳过] {rec['symbol']} 单笔WCD超限")
+            continue
+        # 建议3：单品种保证金 ≤ 15%
+        ul_q = api.get_quote(rec["ul"])
+        wait(api, deadline=5)
+        per_lot = estimate_short_option_margin(
+            limit, mult, getattr(ul_q, "margin", None),
+            rec["strike"], rec["ul_price"], rec["type"])
+        vol = cap_volume_by_margin(wcd_vol, per_lot, INIT_BALANCE)
+        if vol <= 0:
+            print(f"  [跳过] {rec['symbol']} 集中度超限（单手≈{per_lot:,.0f}）")
+            continue
         try:
             order = api.insert_order(rec["symbol"], direction="SELL",
-                                     offset="OPEN", volume=1, limit_price=limit)
+                                     offset="OPEN", volume=vol, limit_price=limit)
             wait(api, deadline=8)
-            orders.append(("SELL_OPEN", rec["symbol"], rec["ul"], rec["iv_premium"], order))
-            print(f"  [下单] 卖开 {rec['symbol']}  限价={limit}  IV溢价={rec['iv_premium']*100:.1f}%")
+            orders.append(("SELL_OPEN", rec["symbol"], rec["ul"],
+                           rec["iv_premium"], order, vol, rec["type"]))
+            print(f"  [下单] 卖开 {rec['symbol']} {vol}手  限价={limit}  "
+                  f"IV溢价={rec['iv_premium']*100:.1f}%")
         except Exception as e:
             print(f"  [下单失败] {rec['symbol']}: {e}")
         if len([o for o in orders if o[0] == "SELL_OPEN"]) >= 2:
             break
-    # 保险端：为每个卖方标的买远 OTM put（用 rec 中已存的 ul，避免字符串拆分）
-    for o in [x for x in orders if x[0] == "SELL_OPEN"]:
-        _, sym, ul_sym, ivp, _ = o
-        ins = select_insurance_put(api, ul_sym)
+    # 保险端：卖Put配远OTM Put，卖Call配远OTM Call；手数≤卖方手数，受预算约束
+    sell_legs = [x for x in orders if x[0] == "SELL_OPEN"]
+    budget_per_leg = insurance_budget / max(len(sell_legs), 1)
+    for o in sell_legs:
+        _, sym, ul_sym, ivp, _, sell_vol, otype = o
+        cp = "PUT" if otype == "PUT" else "CALL"
+        ins = select_insurance(api, ul_sym, cp)
         if not ins:
-            print(f"  [保险] {ul_sym} 无合适远 OTM put")
+            print(f"  [保险] {ul_sym} 无合适远 OTM {cp}")
             continue
-        vol_mult = api.get_quote(sym).volume_multiple or 10
-        qty = max(1, int(insurance_budget / max(ins["price"] * vol_mult, 1)))
+        vol_mult = api.get_quote(ins["symbol"]).volume_multiple or 10
+        qty = min(sell_vol, int(budget_per_leg / max(ins["price"] * vol_mult, 1)))
+        if qty <= 0:
+            print(f"  [保险] {ul_sym} 预算不足以买入1手")
+            continue
         limit = get_limit_price(api, ins["symbol"], "BUY")
         if not limit:
             print(f"  [跳过保险] {ins['symbol']} 无可用限价")
@@ -360,7 +388,8 @@ def build_portfolio(api, sell_candidates, insurance_budget):
                                      offset="OPEN", volume=qty, limit_price=limit)
             wait(api, deadline=8)
             orders.append(("BUY_INSURANCE", ins["symbol"], ul_sym, ins["delta"], order))
-            print(f"  [下单] 买保 {ins['symbol']}  限价={limit}  Delta={ins['delta']:.3f}  手数={qty}")
+            print(f"  [下单] 买保 {ins['symbol']} {qty}手  限价={limit}  "
+                  f"Delta={ins['delta']:.3f}")
         except Exception as e:
             print(f"  [保险下单失败] {ins['symbol']}: {e}")
     return orders
