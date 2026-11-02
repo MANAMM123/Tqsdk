@@ -61,7 +61,7 @@ def main():
         opts = api.query_options(underlying, expired=False)
         print(f"  在市期权数: {len(opts)}")
 
-        # 选近 ATM Put（卖Put=看涨），优先 15-35 DTE，否则取最近的
+        # 选近 ATM Put（卖Put=看涨），严格 15-35 DTE
         import re
         candidates = []
         for o in opts:
@@ -73,11 +73,16 @@ def main():
             k = float(m.group(1))
             candidates.append((abs(k - S), o, oq, dte))
         candidates.sort()
-        # 优先 15-35 DTE，否则取 DTE 最接近区间的
+        # 严格筛选 15-35 DTE（不 fallback，违规不开仓）
         in_range = [c for c in candidates if ENTRY_DTE_MIN <= c[3] <= ENTRY_DTE_MAX]
-        chosen = in_range[:8] if in_range else candidates[:8]
-        print(f"  近ATM Put候选: {len(chosen)} 个 "
-              f"(DTE范围 {min(c[3] for c in chosen):.0f}-{max(c[3] for c in chosen):.0f})")
+        if not in_range:
+            dte_range = f"{min(c[3] for c in candidates):.0f}-{max(c[3] for c in candidates):.0f}" if candidates else "N/A"
+            print(f"  ⚠️ 无 {ENTRY_DTE_MIN}-{ENTRY_DTE_MAX} DTE 的 Put 合约")
+            print(f"  当前期权 DTE 范围: {dte_range}，不在建仓窗口内，不开仓")
+            print("  （等待下一个到期月进入 15-35 DTE 区间）")
+            return
+        chosen = in_range[:8]
+        print(f"  近ATM Put候选（{ENTRY_DTE_MIN}-{ENTRY_DTE_MAX} DTE）: {len(chosen)} 个")
 
         best = None
         for dist, o, oq, dte in chosen:
@@ -89,12 +94,31 @@ def main():
                 best = (o, info)
 
         if not best:
-            print("  无满足全部条件的合约，用 DTE 最接近 15-35 的候选演示")
-            chosen.sort(key=lambda c: abs(c[3] - 25))
-            best = (chosen[0][1], {"iv_premium": 0, "symbol": chosen[0][1]})
+            print("  无满足全部条件的合约，不开仓")
+            return
 
         sym, info = best
         print(f"\n  选中: {sym}")
+
+        # ===== 2.5 三阶 Greeks 明细 =====
+        print("\n" + "-" * 60)
+        print("【选中合约三阶 Greeks】")
+        print("-" * 60)
+        from seller_greeks_system import option_greeks_full, implied_vol, RISK_FREE_RATE, get_price
+        sel_q = api.get_quote(sym)
+        wait(api, deadline=5)
+        S_sel = get_price(ul_q)
+        K_sel = sel_q.strike_price
+        T_sel = (sel_q.expire_rest_days or 0) / 365.0
+        P_sel = get_price(sel_q)
+        if all([S_sel, K_sel, P_sel, T_sel > 0]):
+            iv_sel = implied_vol(P_sel, S_sel, K_sel, T_sel, RISK_FREE_RATE, sel_q.option_class)
+            if iv_sel:
+                g = option_greeks_full(S_sel, K_sel, T_sel, RISK_FREE_RATE, iv_sel, sel_q.option_class)
+                print(f"  S={S_sel} K={K_sel} T={T_sel*365:.0f}DTE IV={iv_sel*100:.1f}%")
+                print(f"  一阶: Δ={g['delta']:.3f}  V={g['vega']:.1f}  Θ={g['theta']:.1f}")
+                print(f"  二阶: Γ={g['gamma']*S_sel:.6f}(×S归一)  Vanna={g['vanna']:.4f}")
+                print(f"  三阶: Speed={g['speed']:.8f}  Color={g['color']:.6f}")
 
         # ===== 3. WCD 定仓位 + 卖开 + 买保险 =====
         print("\n" + "=" * 60)

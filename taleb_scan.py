@@ -68,6 +68,12 @@ INSURANCE_BUDGET_RATIO = 0.0333  # 尾部保险预算占净值比例
 RISK_FREE_RATE = 0.025           # 无风险利率（BS 用）
 DEADLINE = 20                    # wait_update 超时秒数
 
+# --- 建仓 DTE 时间窗口（与三阶 Greeks 维度配合，非"三阶"本身）---
+# 三阶 = 希腊字母微分阶数：一阶(Delta/Vega/Theta) 二阶(Gamma/Vanna) 三阶(Speed/Color)
+# DTE 是时间窗口：建仓 15-35 DTE，持仓 15-10 DTE，硬退 ≤10 DTE
+ENTRY_DTE_MIN = 15               # 建仓最小到期天数
+ENTRY_DTE_MAX = 35               # 建仓最大到期天数
+
 # ============ Black-Scholes 工具 ============
 def _bs_price(S, K, T, r, sigma, opt_type):
     if T <= 0 or sigma <= 0:
@@ -206,10 +212,14 @@ def scan_option(api, opt_symbol, hv, opt_q=None, ul_q=None):
         wait(api)
     S = ul_q.last_price or ul_q.pre_settlement
     K = q.strike_price
-    T = (q.expire_rest_days or 0) / 365.0
+    dte = q.expire_rest_days or 0
+    T = dte / 365.0
     opt_type = q.option_class  # CALL / PUT
     price = get_option_price(q)
     if not S or not K or not price or T <= 0:
+        return None
+    # 建仓 DTE 窗口过滤：只保留 15-35 DTE 的合约（避免 Gamma 爆炸区建仓）
+    if not (ENTRY_DTE_MIN <= dte <= ENTRY_DTE_MAX):
         return None
     iv = implied_vol(price, S, K, T, RISK_FREE_RATE, opt_type)
     if iv is None:
@@ -233,6 +243,7 @@ def scan_option(api, opt_symbol, hv, opt_q=None, ul_q=None):
         "ul": ul_sym,
         "ul_price": S,
         "price": price,
+        "dte": dte,
         "iv": iv,
         "hv": hv,
         "iv_premium": iv_premium,
@@ -447,7 +458,7 @@ def main():
         print(df["verdict"].value_counts().to_string())
         sellable = df[df["verdict"] == "SELL_WITH_HEDGE"].sort_values("iv_premium", ascending=False)
         print("\n【可收租候选（需配保险）—— IV 溢价从高到低】")
-        cols = ["exchange", "ul", "symbol", "type", "iv", "iv_premium", "otm_dist", "tail_risk"]
+        cols = ["exchange", "ul", "symbol", "type", "dte", "iv", "iv_premium", "otm_dist", "tail_risk"]
         print(sellable[cols].head(15).to_string(index=False))
 
         # 构建杠铃组合并下单

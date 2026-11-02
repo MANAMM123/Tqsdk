@@ -15,15 +15,20 @@ TqSdk 是信易科技开源的 Python 量化交易开发包，面向国内期货
   A. 用户入场规则：缠论中枢二买方向 + 35-15 DTE + IV>HV + OI递减 + 期权墙
   B. 塔勒布风控：尾部保险(杠铃) + 最坏单日(WCD)定仓位 + 不加杠杆 + 集中度限制
 
-卖方 Greeks 三阶段（按用户纠正）：
-  阶段一 建仓期 DTE 35-15 ：缠论二买定方向 + IV>HV + OI递减 + 期权墙 → 开仓 + 尾部保险
-  阶段二 持仓期 DTE 15-10 ：Delta/Gamma 监控 → 移动止盈(回撤≤50%) → 期权墙迁移检测
-  阶段三 硬止盈止损 DTE ≤10：无论盈亏强制平仓（HARD_TP / HARD_STOP）
+卖方 Greeks 三阶管理（按微分阶数划分，非 DTE 阶段）：
+  一阶 Greeks（Delta/Vega/Theta）：方向、波动率、时间价值风险
+  二阶 Greeks（Gamma/Vanna/Charm）：凸性加速度，超限需减仓/对冲
+  三阶 Greeks（Speed/Zomma/Color）：Gamma 变化率，爆炸即硬退出
 
-【Greeks 阶段关注点】
-  阶段一：Theta(正) / Vega(负) / Delta(中性微偏)
-  阶段二：Gamma(上升) / Delta(漂移) / Vega(衰减)
-  阶段三：Gamma(爆炸) / Theta(末加速) / 流动性
+DTE 时间窗口（与三阶 Greeks 维度配合）：
+  建仓 35-15 DTE ：缠论二买 + IV>HV + OI递减 + 期权墙 → 开仓 + 尾部保险
+  持仓 15-10 DTE ：二阶 Gamma 上升，一阶 Delta/Vega 监控 + 移动止盈
+  硬退 ≤10 DTE ：三阶 Greeks 爆炸，无论盈亏强制平仓
+
+【Greeks 阶数关注点】
+  一阶：Theta(正收租) / Vega(负，IV升则亏) / Delta(方向漂移)
+  二阶：Gamma(卖方为负，凸性风险) / Vanna(Delta对IV敏感)
+  三阶：Speed(Γ的价格变化率) / Color(Γ的时间变化率，临近到期爆炸)
 
 【运行说明】
 1. pip install tqsdk scipy numpy pandas
@@ -52,12 +57,17 @@ INIT_BALANCE = 100000.0
 RISK_FREE_RATE = 0.025
 DEADLINE = 20
 
-# --- 希腊字母三阶（按 DTE 划分）---
-# 阶段一 建仓: 35-15 DTE
-# 阶段二 持仓: 15-10 DTE
-# 阶段三 硬止盈止损: ≤10 DTE
+# --- 希腊字母三阶（按微分阶数划分，非 DTE 阶段）---
+# 一阶 Greeks: Delta, Vega, Theta  → 方向/波动率/时间风险
+# 二阶 Greeks: Gamma, Vanna, Charm → 加速度（凸性风险）
+# 三阶 Greeks: Speed, Zomma, Color → 加加速度（Gamma 变化率，临近到期爆炸）
+#
+# DTE 窗口是时间触发条件，与三阶 Greeks 维度配合：
+#   建仓: 35-15 DTE（Gamma 尚小，以一阶管理为主）
+#   持仓: 15-10 DTE（Gamma 上升，二阶管理介入）
+#   硬退: ≤10 DTE 或 三阶 Greeks 爆炸（Gamma 及其变化率失控）
 
-# --- 阶段一 建仓参数 ---
+# --- 建仓参数（DTE 时间窗口）---
 ENTRY_DTE_MIN = 15          # 建仓最小到期天数
 ENTRY_DTE_MAX = 35          # 建仓最大到期天数
 IV_PREMIUM_MIN = 0.15       # IV 相对 HV 最低溢价
@@ -65,15 +75,19 @@ OI_DECLINE_DAYS = 2         # OI 连续减少天数阈值
 WALL_DISTANCE_MAX = 0.05    # 距期权墙最大距离（5%）
 TAIL_INSURANCE_DELTA = 0.10 # 尾部保险腿目标 Delta（风控建议1）
 
-# --- 阶段二 持仓管理参数 ---
-MANAGE_DTE_MIN = 10         # 持仓管理阶段下界（进入硬止盈止损）
-MANAGE_DTE_MAX = 15         # 持仓管理阶段上界
-DELTA_LIMIT = 0.30          # Delta 漂移上限（绝对值）
+# --- 一阶 Greeks 管理参数 ---
+DELTA_LIMIT = 0.50          # 一阶：Delta 漂移上限（绝对值，卖 Put 近 ATM 约 -0.4）
+VEGA_LIMIT = 5000.0         # 一阶：Vega 暴露上限（元/IV 1%变动），超此需对冲
 TP_RETRACE_RATIO = 0.50     # 移动止盈：权利金回撤不超过 50%
-WALL_SHIFT_ALERT = 0.02     # 期权墙迁移告警阈值
 
-# --- 阶段三 硬止盈止损参数 ---
-HARD_EXIT_DTE = 10          # DTE ≤ 10 强制平仓（硬止盈止损）
+# --- 二阶 Greeks 管理参数 ---
+GAMMA_LIMIT = 0.05          # 二阶：Gamma 上限（Γ×S 归一化后），超此需减仓或对冲
+VANNA_LIMIT = 10.0          # 二阶：Vanna 上限（Delta 对 IV 敏感度）
+
+# --- 三阶 Greeks 管理参数（硬退出触发）---
+HARD_EXIT_DTE = 10          # 时间触发：DTE ≤ 10 强制平仓
+SPEED_LIMIT = 0.001         # 三阶：Speed 上限（Γ 的价格变化率），超此 Gamma 失控
+COLOR_EXPLOSION = -0.0005   # 三阶：Color 阈值（Γ 的时间衰减率，负且绝对值大=加速爆炸）
 
 # --- 风控参数（塔勒布三条建议）---
 WCD_RATIO = 0.02            # 建议2：最坏单日亏损不超过组合 2%（据此定仓位）
@@ -106,6 +120,7 @@ def implied_vol(price, S, K, T, r, opt_type):
 
 
 def option_greeks(S, K, T, r, sigma, opt_type):
+    """计算一阶 Greeks: delta / gamma / vega / theta"""
     if T is None or T <= 0 or sigma is None or sigma <= 0:
         return 0.0, 0.0, 0.0, 0.0
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
@@ -116,6 +131,57 @@ def option_greeks(S, K, T, r, sigma, opt_type):
     theta = (-(S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T))
              - opt_type_sign(opt_type) * r * K * math.exp(-r * T) * norm.cdf(opt_type_sign(opt_type) * d2))
     return delta, gamma, vega, theta
+
+
+def option_greeks_full(S, K, T, r, sigma, opt_type):
+    """计算一阶 + 二阶 + 三阶 Greeks（完整微分阶数）
+
+    一阶 Greeks（价格/波动率/时间的一阶导数）：
+      delta, vega, theta
+    二阶 Greeks（一阶 Greeks 的变化率 = 加速度）：
+      gamma  = ∂Delta/∂S = ∂²V/∂S²       凸性/加速度
+      vanna  = ∂Delta/∂σ = ∂Vega/∂S       Delta对波动率的敏感度
+      charm  = ∂Delta/∂t                    Delta随时间的衰减
+      vomma  = ∂Vega/∂σ = ∂²V/∂σ²        Vega对波动率的敏感度
+    三阶 Greeks（Gamma 的变化率 = 加加速度）：
+      speed  = ∂Gamma/∂S = ∂³V/∂S³       Gamma随价格的变化
+      zomma  = ∂Gamma/∂σ                  Gamma随波动率的变化
+      color  = ∂Gamma/∂t                  Gamma随时间的变化（临近到期爆炸）
+
+    返回: dict 包含全部 Greeks
+    """
+    if T is None or T <= 0 or sigma is None or sigma <= 0:
+        return {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0,
+                "vanna": 0.0, "charm": 0.0, "vomma": 0.0,
+                "speed": 0.0, "zomma": 0.0, "color": 0.0}
+    sqrtT = math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrtT)
+    d2 = d1 - sigma * sqrtT
+    phi = norm.pdf(d1)
+    sign = opt_type_sign(opt_type)
+
+    # 一阶
+    delta = norm.cdf(d1) if opt_type == "CALL" else norm.cdf(d1) - 1.0
+    vega = S * phi * sqrtT
+    theta = (-(S * phi * sigma) / (2 * sqrtT)
+             - sign * r * K * math.exp(-r * T) * norm.cdf(sign * d2))
+
+    # 二阶
+    gamma = phi / (S * sigma * sqrtT)
+    vanna = -phi * d2 / sigma                       # ∂Delta/∂σ
+    charm = -phi * (2 * r * T - d2 * sigma * sqrtT) / (2 * T * sigma * sqrtT)  # ∂Delta/∂t
+    vomma = vega * d1 * d2 / sigma                  # ∂Vega/∂σ
+
+    # 三阶
+    speed = -gamma / S * (d1 / (sigma * sqrtT) + 1.0)        # ∂Gamma/∂S
+    zomma = gamma * (d1 * d2 - 1.0) / sigma                   # ∂Gamma/∂σ
+    color = -gamma * (r * d2 / (sigma * sqrtT) + (1.0 + d1 * d2) / (2 * T))  # ∂Gamma/∂t
+
+    return {
+        "delta": delta, "gamma": gamma, "vega": vega, "theta": theta,
+        "vanna": vanna, "charm": charm, "vomma": vomma,
+        "speed": speed, "zomma": zomma, "color": color,
+    }
 
 
 def opt_type_sign(t):
@@ -323,7 +389,7 @@ def chan_second_buy(api, underlying):
     return None
 
 
-# ============ 阶段一：建仓筛选 ============
+# ============ 建仓筛选（35-15 DTE） ============
 class EntryFilter:
     """建仓阶段筛选器"""
 
@@ -425,9 +491,9 @@ class EntryFilter:
         return True, info
 
 
-# ============ 阶段二：持仓管理 ============
+# ============ 持仓 Greeks 管理（一阶→二阶→三阶） ============
 class PositionManager:
-    """持仓阶段 Greeks 管理器"""
+    """持仓 Greeks 管理器（按微分阶数：一阶→二阶→三阶）"""
 
     def __init__(self, api, entry_premium):
         self.api = api
@@ -435,8 +501,13 @@ class PositionManager:
         self.max_profit = 0.0               # 持仓期间最大浮盈（权利金减少量）
 
     def monitor(self, option_symbol):
-        """监控 Greeks，返回 (动作, 原因)
-        动作: HOLD / TP / STOP / ADJUST / CLOSE
+        """按三阶 Greeks 维度监控，返回 (动作, 原因)
+
+        动作: HOLD / TP / STOP / ADJUST / HARD_EXIT
+        维度:
+          一阶: Delta, Vega（方向/波动率风险）
+          二阶: Gamma（凸性加速度，超限→减仓/对冲）
+          三阶: Speed, Color（Gamma 变化率，爆炸→硬退出）
         """
         q = self.api.get_quote(option_symbol)
         wait(self.api)
@@ -451,44 +522,71 @@ class PositionManager:
         iv = implied_vol(price, S, K, T, RISK_FREE_RATE, q.option_class)
         if not iv:
             return "HOLD", "IV无法计算"
-        delta, gamma, vega, theta = option_greeks(S, K, T, RISK_FREE_RATE, iv, q.option_class)
-        # Delta 漂移检查（阶段二管理）
+        g = option_greeks_full(S, K, T, RISK_FREE_RATE, iv, q.option_class)
+        delta, gamma = g["delta"], g["gamma"]
+        vega, speed, color = g["vega"], g["speed"], g["color"]
+        gamma_norm = gamma * S  # 归一化 Gamma（消除价格量纲）
+
+        # 三阶 Greeks：Gamma 变化率爆炸 → 硬退出（无论 DTE）
+        if abs(speed) > SPEED_LIMIT or color < COLOR_EXPLOSION:
+            return ("HARD_EXIT",
+                    f"三阶爆炸 Speed={speed:.6f}(>{SPEED_LIMIT}) "
+                    f"Color={color:.6f}(<{COLOR_EXPLOSION})")
+
+        # 二阶 Greeks：Gamma 超限 → 减仓或对冲
+        if gamma_norm > GAMMA_LIMIT:
+            return "ADJUST", f"二阶Γ×S={gamma_norm:.5f} 超阈值 {GAMMA_LIMIT}"
+
+        # 一阶 Greeks：Delta 漂移 / Vega 暴露
         if abs(delta) > DELTA_LIMIT:
-            return "ADJUST", f"Delta={delta:.2f} 超过阈值 {DELTA_LIMIT}"
+            return "ADJUST", f"一阶Δ={delta:.2f} 超阈值 {DELTA_LIMIT}"
+        if abs(vega) > VEGA_LIMIT:
+            return "ADJUST", f"一阶V={vega:.1f} 超阈值 {VEGA_LIMIT}"
+
         # 移动止盈：权利金从最高点回撤超过 50%
         profit = self.entry_premium - price  # 卖方浮盈 = 权利金下跌
         if profit > self.max_profit:
             self.max_profit = profit
         if self.max_profit > 0 and (self.max_profit - profit) > TP_RETRACE_RATIO * self.entry_premium:
             return "TP", f"权利金回撤超 {TP_RETRACE_RATIO*100:.0f}%"
-        # 硬止损：亏损超过 1 倍权利金（阶段三也会触发，但提前拦截）
+        # 硬止损：亏损超过 1 倍权利金
         if profit < -self.entry_premium:
             return "STOP", f"亏损超 1 倍权利金"
-        return "HOLD", f"Δ={delta:.2f} Γ={gamma*S:.5f} V={vega:.1f} Θ={theta:.1f} 浮盈={profit:.2f}"
+
+        return ("HOLD",
+                f"一阶Δ={delta:.2f} V={vega:.1f} | 二阶Γ×S={gamma_norm:.5f} | "
+                f"三阶Spd={speed:.6f} Col={color:.6f} | 浮盈={profit:.2f}")
 
 
-# ============ 阶段三：硬止盈止损 ============
+# ============ 硬退出管理器 ============
 class HardExitManager:
-    """阶段三：DTE ≤ 10 强制平仓（硬止盈止损）
+    """硬退出触发条件（时间 + 三阶 Greeks 双维度）
 
-    到 10 DTE 不再持有，无论盈亏都平仓：
-      - 浮盈 → 硬止盈（锁定 Theta 收益）
-      - 浮亏 → 硬止损（避免到期 Gamma 爆炸）
+    触发硬退出的两个独立条件（满足其一即平仓）：
+      1. 时间触发：DTE ≤ HARD_EXIT_DTE
+      2. Greeks 触发：三阶 Greeks 爆炸（Speed/Color 失控）
     """
 
     @staticmethod
-    def decide(q, entry_premium):
-        """返回 (动作, 原因)，动作: HARD_TP / HARD_STOP"""
+    def decide(q, entry_premium, speed=None, color=None):
+        """返回 (动作, 原因)，动作: HARD_TP / HARD_STOP / HOLD"""
         dte = q.expire_rest_days or 0
-        if dte > HARD_EXIT_DTE:
-            return "HOLD", f"DTE={dte} > {HARD_EXIT_DTE}"
         price = get_price(q)
+        # 条件1：DTE 时间触发
+        time_trigger = dte <= HARD_EXIT_DTE
+        # 条件2：三阶 Greeks 爆炸触发
+        greeks_trigger = (speed is not None and abs(speed) > SPEED_LIMIT) or \
+                         (color is not None and color < COLOR_EXPLOSION)
+
+        if not (time_trigger or greeks_trigger):
+            return "HOLD", f"DTE={dte} Speed={speed} 未达硬退出条件"
         if price is None:
             return "HOLD", "无价格"
         profit = entry_premium - price  # 卖方浮盈
+        trigger_src = "DTE" if time_trigger else "三阶Greeks"
         if profit >= 0:
-            return "HARD_TP", f"DTE={dte}≤{HARD_EXIT_DTE} 硬止盈，浮盈={profit:.2f}"
-        return "HARD_STOP", f"DTE={dte}≤{HARD_EXIT_DTE} 硬止损，浮亏={profit:.2f}"
+            return "HARD_TP", f"{trigger_src}触发硬止盈，浮盈={profit:.2f}"
+        return "HARD_STOP", f"{trigger_src}触发硬止损，浮亏={profit:.2f}"
 
 
 # ============ 主策略类 ============
@@ -620,33 +718,44 @@ class SellerGreeksSystem:
         return None
 
     def stage_two_manage(self):
-        """阶段二：持仓管理（15-10 DTE）"""
+        """持仓管理：按三阶 Greeks 维度持续监控（不区分 DTE 阶段）"""
         for sym, pos in list(self.positions.items()):
-            if pos["stage"] != 1 and pos["stage"] != 2:
-                continue
             action, reason = pos["manager"].monitor(sym)
             q = self.api.get_quote(sym)
             wait(self.api)
             dte = q.expire_rest_days or 0
-            # 阶段切换：≤10 DTE → 阶段三硬止盈止损
+            # DTE 阶段标记（仅用于日志，风控以 Greeks 阶数为准）
             if dte <= HARD_EXIT_DTE:
                 pos["stage"] = 3
-                self._log("STAGE_3", sym, f"DTE={dte}≤{HARD_EXIT_DTE} 进入硬止盈止损")
-            elif dte <= MANAGE_DTE_MAX:
+            elif dte <= ENTRY_DTE_MIN:
                 pos["stage"] = 2
+            # 三阶 Greeks 爆炸 → 立即硬退出
+            if action == "HARD_EXIT":
+                self._close_position(sym, "HARD_STOP", reason)
+                continue
             if action == "HOLD":
                 continue
             if action in ("TP", "STOP", "ADJUST"):
                 self._close_position(sym, action, reason)
 
     def stage_three_hard_exit(self):
-        """阶段三：硬止盈止损（≤10 DTE 强制平仓）"""
+        """硬退出检查：DTE ≤ 10 或 三阶 Greeks 爆炸"""
         for sym, pos in list(self.positions.items()):
-            if pos["stage"] != 3:
-                continue
             q = self.api.get_quote(sym)
             wait(self.api)
-            action, reason = HardExitManager.decide(q, pos["entry_premium"])
+            ul_q = self.api.get_quote(q.underlying_symbol)
+            wait(self.api)
+            S = get_price(ul_q)
+            K = q.strike_price
+            T = (q.expire_rest_days or 0) / 365.0
+            price = get_price(q)
+            speed, color = None, None
+            if all([S, K, price, T > 0]):
+                iv = implied_vol(price, S, K, T, RISK_FREE_RATE, q.option_class)
+                if iv:
+                    g = option_greeks_full(S, K, T, RISK_FREE_RATE, iv, q.option_class)
+                    speed, color = g["speed"], g["color"]
+            action, reason = HardExitManager.decide(q, pos["entry_premium"], speed, color)
             if action in ("HARD_TP", "HARD_STOP"):
                 self._close_position(sym, action, reason)
 
