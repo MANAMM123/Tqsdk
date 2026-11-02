@@ -31,6 +31,10 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller --noconfirm --windowed --name OptionRadar --collect-submodules scipy._external.array_api_compat app.py
 
+      - name: Add installer scripts
+        run: |
+          Copy-Item install_to_desktop.ps1, create_desktop_shortcut.ps1, 安装到桌面.bat, 创建桌面快捷方式.bat -Destination dist/OptionRadar
+
       - name: Package zip
         run: Compress-Archive -Path dist/OptionRadar -DestinationPath OptionRadar-Windows.zip
 

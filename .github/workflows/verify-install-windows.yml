@@ -20,6 +20,7 @@ jobs:
       - name: Run install script
         shell: pwsh
         run: |
+          # 使用随包附带的安装脚本，验证 Windows 真实安装流程
           Set-Location "$env:RUNNER_TEMP\pkg\OptionRadar"
           "" | powershell -NoProfile -ExecutionPolicy Bypass -File .\install_to_desktop.ps1
 
