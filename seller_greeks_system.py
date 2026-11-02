@@ -76,12 +76,14 @@ WALL_DISTANCE_MAX = 0.05    # 距期权墙最大距离（5%）
 TAIL_INSURANCE_DELTA = 0.10 # 尾部保险腿目标 Delta（风控建议1）
 
 # --- 一阶 Greeks 管理参数 ---
-DELTA_LIMIT = 0.50          # 一阶：Delta 漂移上限（绝对值，卖 Put 近 ATM 约 -0.4）
-VEGA_LIMIT = 5000.0         # 一阶：Vega 暴露上限（元/IV 1%变动），超此需对冲
+DELTA_LIMIT = 0.50          # 一阶：Delta 漂移上限（无量纲，卖 Put 近 ATM 约 -0.4）
 TP_RETRACE_RATIO = 0.50     # 移动止盈：权利金回撤不超过 50%
 
 # --- 二阶 Greeks 管理参数 ---
-GAMMA_LIMIT = 0.05          # 二阶：Gamma 上限（Γ×S 归一化后），超此需减仓或对冲
+# 同样用相对建仓基线的倍数：Γ×S 跨品种实测 2.8~15.4，Vega 72~35541，
+# 任何单一绝对阈值都会在开仓瞬间误触发（实测 Γ 100%、Vega 29% 命中）。
+GAMMA_ADJUST_MULT = 1.5     # Γ×S 相对建仓基线增长 50% → 减仓/对冲
+VEGA_ADJUST_MULT = 1.5      # Vega 相对建仓基线增长 50% → 减仓/对冲
 VANNA_LIMIT = 10.0          # 二阶：Vanna 上限（Delta 对 IV 敏感度）
 
 # --- 三阶 Greeks 管理参数（硬退出触发）---
@@ -503,11 +505,23 @@ class EntryFilter:
             info["reason"] = f"IV溢价不足: {premium}"
             return False, info
         info["iv_premium"] = premium
+        # 一阶 Delta 建仓上限：ITM/深实值卖方的 |Δ| 过大，开仓即触发 ADJUST
+        S = get_price(ul_q)
+        K = q.strike_price
+        T = (q.expire_rest_days or 0) / 365.0
+        price = get_price(q)
+        if all([S, K, price, T > 0]):
+            iv = implied_vol(price, S, K, T, RISK_FREE_RATE, q.option_class)
+            if iv:
+                d, _, _, _ = option_greeks(S, K, T, RISK_FREE_RATE, iv, q.option_class)
+                info["delta"] = d
+                if abs(d) > DELTA_LIMIT:
+                    info["reason"] = f"|Δ|={abs(d):.2f} > {DELTA_LIMIT}（建仓即超一阶上限）"
+                    return False, info
         # 期权墙距离检查
         cp = "CALL" if direction == "SHORT" else "PUT"  # 涨卖Put→方向SHORT对应卖Put
         wall = self.find_option_wall(q.underlying_symbol, cp)
         if wall:
-            S = get_price(ul_q)
             dist = abs(wall - q.strike_price) / S if S else 1
             info["wall"] = wall
             info["wall_dist"] = dist
@@ -526,13 +540,16 @@ class PositionManager:
         self.api = api
         self.entry_premium = entry_premium  # 开仓时权利金
         self.max_profit = 0.0               # 持仓期间最大浮盈（权利金减少量）
-        # 三阶 Greeks 建仓基线（爆炸判定以相对倍数比较，不用绝对阈值）
+        # 建仓基线（Greeks 风险以相对倍数比较，不用绝对阈值）
         self.base_speed = entry_speed
         self.base_color = entry_color
+        self.base_gamma_norm = None
+        self.base_vega = None
 
-    def _set_baseline(self, speed, color):
+    def _set_baseline(self, speed, color, gamma_norm, vega):
         if self.base_speed is None and self.base_color is None:
             self.base_speed, self.base_color = speed, color
+            self.base_gamma_norm, self.base_vega = gamma_norm, abs(vega)
             return True
         return False
 
@@ -554,6 +571,8 @@ class PositionManager:
             return None
         g = option_greeks_full(S, K, T, RISK_FREE_RATE, iv, q.option_class)
         self.base_speed, self.base_color = g["speed"], g["color"]
+        self.base_gamma_norm = g["gamma"] * S
+        self.base_vega = abs(g["vega"])
         return self.base_speed, self.base_color
 
     def monitor(self, option_symbol):
@@ -584,22 +603,25 @@ class PositionManager:
         gamma_norm = gamma * S  # 归一化 Gamma（消除价格量纲）
 
         # 三阶 Greeks：相对建仓基线爆炸 → 硬退出（无论 DTE）
-        if self._set_baseline(speed, color):
-            print(f"  [基线] {option_symbol} Speed={speed:.3g} Color={color:.3g} 已记录")
+        if self._set_baseline(speed, color, gamma_norm, vega):
+            print(f"  [基线] {option_symbol} Speed={speed:.3g} Color={color:.3g} "
+                  f"Γ×S={gamma_norm:.3g} Vega={vega:.3g} 已记录")
         else:
             exploded, why = greeks_exploded(speed, color, self.base_speed, self.base_color)
             if exploded:
                 return "HARD_EXIT", f"三阶爆炸 {why}"
 
-        # 二阶 Greeks：Gamma 超限 → 减仓或对冲
-        if gamma_norm > GAMMA_LIMIT:
-            return "ADJUST", f"二阶Γ×S={gamma_norm:.5f} 超阈值 {GAMMA_LIMIT}"
+        # 二阶 Greeks：Γ×S 相对基线增长超倍 → 减仓或对冲
+        if self.base_gamma_norm and gamma_norm > GAMMA_ADJUST_MULT * self.base_gamma_norm:
+            return ("ADJUST", f"二阶Γ×S={gamma_norm:.3g} 增至 "
+                    f"{gamma_norm/self.base_gamma_norm:.2f}x基线(>{GAMMA_ADJUST_MULT}x)")
 
-        # 一阶 Greeks：Delta 漂移 / Vega 暴露
+        # 一阶 Greeks：Delta 漂移 / Vega 相对基线放大
         if abs(delta) > DELTA_LIMIT:
             return "ADJUST", f"一阶Δ={delta:.2f} 超阈值 {DELTA_LIMIT}"
-        if abs(vega) > VEGA_LIMIT:
-            return "ADJUST", f"一阶V={vega:.1f} 超阈值 {VEGA_LIMIT}"
+        if self.base_vega and abs(vega) > VEGA_ADJUST_MULT * self.base_vega:
+            return ("ADJUST", f"一阶V={vega:.1f} 增至 "
+                    f"{abs(vega)/self.base_vega:.2f}x基线(>{VEGA_ADJUST_MULT}x)")
 
         # 移动止盈：权利金从最高点回撤超过 50%
         profit = self.entry_premium - price  # 卖方浮盈 = 权利金下跌
