@@ -2,6 +2,9 @@ name: Verify Windows Installer
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/verify-install-windows.yml"
 
 jobs:
   verify:
