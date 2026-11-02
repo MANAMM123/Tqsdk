@@ -233,6 +233,29 @@ def wait(api, deadline=DEADLINE):
     api.wait_update(deadline=deadline)
 
 
+def estimate_short_option_margin(premium, volume_multiple, fut_margin_per_lot,
+                                 strike, S, opt_type):
+    """估算单手卖方保证金（交易所通用公式近似）
+
+    卖方保证金 ≈ 权利金 + max(标的保证金 - 虚值额, 标的保证金 × 0.5)
+    仅用于建仓前集中度预检；精确值以持仓返回的 margin 为准。
+    """
+    if not fut_margin_per_lot:
+        return None
+    otm = max(strike - S, 0) if opt_type == "CALL" else max(S - strike, 0)
+    value = premium * volume_multiple + max(
+        fut_margin_per_lot - otm * volume_multiple, fut_margin_per_lot * 0.5)
+    return value
+
+
+def cap_volume_by_margin(volume, per_lot_margin, equity):
+    """建议3：单品种保证金占比 ≤ MAX_POS_PER_UL，返回可用手数"""
+    if not per_lot_margin or per_lot_margin <= 0:
+        return volume
+    max_lots = int(equity * MAX_POS_PER_UL / per_lot_margin)
+    return min(volume, max_lots)
+
+
 def get_price(q):
     for f in ("last_price", "bid_price1", "ask_price1", "pre_settlement"):
         v = getattr(q, f, None)
@@ -774,6 +797,19 @@ class SellerGreeksSystem:
         if volume <= 0:
             print(f"  WCD超限：权利金={entry_price} 乘数={vol_mult} 单笔风险>{WCD_RATIO*100:.0f}%，跳过")
             return
+        # 3.5 集中度上限（建议3：单品种保证金 ≤ 15%）
+        per_lot = estimate_short_option_margin(
+            entry_price, vol_mult, getattr(ul_q, "margin", None),
+            oq.strike_price, S, "PUT" if direction == "LONG" else "CALL")
+        capped = cap_volume_by_margin(volume, per_lot, INIT_BALANCE)
+        if per_lot and capped != volume:
+            print(f"  集中度上限：单手保证金≈{per_lot:,.0f} "
+                  f"({per_lot/INIT_BALANCE*100:.1f}%) → 手数 {volume}→{capped}")
+        if capped <= 0:
+            print(f"  集中度超限：单手保证金≈{per_lot:,.0f} "
+                  f"({per_lot/INIT_BALANCE*100:.1f}%) > {MAX_POS_PER_UL*100:.0f}%，跳过")
+            return
+        volume = capped
         # 4. 开仓（卖方）
         order = self.api.insert_order(sym, direction="SELL", offset="OPEN",
                                       volume=volume, limit_price=entry_price)
@@ -781,7 +817,7 @@ class SellerGreeksSystem:
         self._log("ENTRY_SELL", sym,
                   f"手数={volume} 权利金={entry_price} IV溢价={best['iv_premium']*100:.1f}% WCD手数")
         # 5. 买尾部保险（杠铃，建议1）
-        ins = self._buy_tail_insurance(underlying)
+        ins = self._buy_tail_insurance(underlying, direction)
         if ins:
             self._log("ENTRY_INSURANCE", ins, "尾部对冲")
         # 6. 记录持仓
@@ -798,8 +834,9 @@ class SellerGreeksSystem:
         if base:
             self._log("GREEKS_BASELINE", sym, f"Speed={base[0]:.3g} Color={base[1]:.3g}")
 
-    def _buy_tail_insurance(self, underlying):
-        """买入同标的远 OTM put 做尾部保险"""
+    def _buy_tail_insurance(self, underlying, direction="LONG"):
+        """买入尾部保险腿：卖Put(LONG)→买远OTM Put；卖Call(SHORT)→买远OTM Call"""
+        cp = "PUT" if direction == "LONG" else "CALL"
         opts = self.api.query_options(underlying, expired=False)
         ul_q = self.api.get_quote(underlying)
         wait(self.api)
@@ -808,17 +845,17 @@ class SellerGreeksSystem:
         for o in opts:
             q = self.api.get_quote(o)
             wait(self.api, deadline=3)
-            if q.option_class != "PUT":
+            if q.option_class != cp:
                 continue
             K = q.strike_price
             T = (q.expire_rest_days or 0) / 365.0
             price = get_price(q)
             if not all([S, K, price, T > 0]):
                 continue
-            iv = implied_vol(price, S, K, T, RISK_FREE_RATE, "PUT")
+            iv = implied_vol(price, S, K, T, RISK_FREE_RATE, cp)
             if not iv:
                 continue
-            d, _, _, _ = option_greeks(S, K, T, RISK_FREE_RATE, iv, "PUT")
+            d, _, _, _ = option_greeks(S, K, T, RISK_FREE_RATE, iv, cp)
             diff = abs(abs(d) - TAIL_INSURANCE_DELTA)
             if diff < best_diff:
                 best_diff, best = diff, o

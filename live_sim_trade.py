@@ -4,11 +4,12 @@
 实盘行情 + TqSim 模拟交易验证
 ============================
 
-用全市场扫描的顶级候选 SHFE.hc（IV 溢价 132%）运行完整管线：
-  缠论二买定方向 → 建仓筛选(DTE/IV溢价/期权墙) → WCD定仓 → 卖开 + 买尾部保险
+用 15-35 DTE 窗口内的有效标的运行完整管线：
+  缠论二买定方向 → 建仓筛选(DTE/IV溢价/Delta/期权墙) → WCD定仓 → 卖开 + 买尾部保险
 
 运行：
-  TQ_ACCOUNT=xxx TQ_PASSWORD=xxx python3 live_sim_trade.py
+  TQ_ACCOUNT=xxx TQ_PASSWORD=xxx python3 live_sim_trade.py [SHFE.cu]
+  （默认 SHFE.cu；可传品种如 SHFE.ag 或具体合约如 SHFE.cu2612）
 """
 
 import os
@@ -20,6 +21,9 @@ sys.path.insert(0, "/workspace")
 from seller_greeks_system import (
     INIT_BALANCE, SellerGreeksSystem, chan_second_buy,
     EntryFilter, ENTRY_DTE_MIN, ENTRY_DTE_MAX,
+    option_greeks_full, implied_vol, RISK_FREE_RATE, get_price,
+    get_limit_price, wait, WCD_RATIO, PositionManager,
+    estimate_short_option_margin, cap_volume_by_margin,
 )
 
 
@@ -34,8 +38,14 @@ def main():
     api = TqApi(account=TqSim(init_balance=INIT_BALANCE),
                 auth=TqAuth(account, password))
     try:
-        # 选标的：SHFE.hc 主力（扫描中 IV 溢价最高之一）
-        q = api.get_quote("KQ.m@SHFE.hc")
+        # 选标的：默认 SHFE.cu（当前 2612 系列期权 DTE≈22，在 15-35 建仓窗口）
+        import re
+        target = sys.argv[1] if len(sys.argv) > 1 else "SHFE.cu"
+        if target.startswith("KQ.") or re.search(r'\d', target):
+            quote_sym = target
+        else:
+            quote_sym = f"KQ.m@{target}"
+        q = api.get_quote(quote_sym)
         api.wait_update(deadline=15)
         underlying = q.underlying_symbol
         ul_q = api.get_quote(underlying)
@@ -61,13 +71,14 @@ def main():
         opts = api.query_options(underlying, expired=False)
         print(f"  在市期权数: {len(opts)}")
 
-        # 选近 ATM Put（卖Put=看涨），严格 15-35 DTE
-        import re
+        # 按缠论方向选边：LONG(看涨)→卖Put，SHORT(看跌)→卖Call
+        cp = "PUT" if direction == "LONG" else "CALL"
+        print(f"  方向={direction} → 卖出 {cp}")
         candidates = []
         for o in opts:
             oq = api.get_quote(o)
             m = re.search(r'[CP](\d+\.?\d*)$', o)
-            if not m or oq.option_class != "PUT":
+            if not m or oq.option_class != cp:
                 continue
             dte = oq.expire_rest_days or 0
             k = float(m.group(1))
@@ -77,12 +88,12 @@ def main():
         in_range = [c for c in candidates if ENTRY_DTE_MIN <= c[3] <= ENTRY_DTE_MAX]
         if not in_range:
             dte_range = f"{min(c[3] for c in candidates):.0f}-{max(c[3] for c in candidates):.0f}" if candidates else "N/A"
-            print(f"  ⚠️ 无 {ENTRY_DTE_MIN}-{ENTRY_DTE_MAX} DTE 的 Put 合约")
+            print(f"  ⚠️ 无 {ENTRY_DTE_MIN}-{ENTRY_DTE_MAX} DTE 的 {cp} 合约")
             print(f"  当前期权 DTE 范围: {dte_range}，不在建仓窗口内，不开仓")
             print("  （等待下一个到期月进入 15-35 DTE 区间）")
             return
         chosen = in_range[:8]
-        print(f"  近ATM Put候选（{ENTRY_DTE_MIN}-{ENTRY_DTE_MAX} DTE）: {len(chosen)} 个")
+        print(f"  近ATM {cp}候选（{ENTRY_DTE_MIN}-{ENTRY_DTE_MAX} DTE）: {len(chosen)} 个")
 
         best = None
         for dist, o, oq, dte in chosen:
@@ -104,7 +115,6 @@ def main():
         print("\n" + "-" * 60)
         print("【选中合约三阶 Greeks】")
         print("-" * 60)
-        from seller_greeks_system import option_greeks_full, implied_vol, RISK_FREE_RATE, get_price
         sel_q = api.get_quote(sym)
         wait(api, deadline=5)
         S_sel = get_price(ul_q)
@@ -124,27 +134,38 @@ def main():
         print("\n" + "=" * 60)
         print("【步骤3】WCD定仓位 → 卖开 → 尾部保险（杠铃）")
         print("=" * 60)
-        sys = SellerGreeksSystem(api)
+        strategy = SellerGreeksSystem(api)
         # 直接调用 stage_one_entry 会重新跑缠论；这里手动执行核心逻辑
-        from seller_greeks_system import get_limit_price, wait, WCD_RATIO
         oq = api.get_quote(sym)
         wait(api, deadline=8)
         entry_price = get_limit_price(api, sym, "SELL")
         vol_mult = oq.volume_multiple or 10
-        volume = sys._calc_wcd_volume(entry_price, vol_mult)
+        volume = strategy._calc_wcd_volume(entry_price, vol_mult)
         print(f"  权利金={entry_price} 乘数={vol_mult}")
         print(f"  WCD手数={volume} (最坏日亏≤组合 {WCD_RATIO*100:.0f}%)")
+        # 建议3：单品种保证金 ≤ 15%，用标的保证金估算单手卖方保证金
+        per_lot = estimate_short_option_margin(
+            entry_price, vol_mult, getattr(ul_q, "margin", None),
+            oq.strike_price, S, cp)
+        capped = cap_volume_by_margin(volume, per_lot, INIT_BALANCE)
+        if per_lot:
+            print(f"  单手卖方保证金≈{per_lot:,.0f} ({per_lot/INIT_BALANCE*100:.1f}%权益)")
+        if capped != volume:
+            print(f"  集中度上限(15%)：手数 {volume}→{capped}")
+        volume = capped
+        if volume <= 0:
+            print("  集中度超限，不开仓")
+            return
+        print(f"  卖开 {sym} 手数={volume} @ {entry_price}")
+        order = api.insert_order(sym, direction="SELL", offset="OPEN",
+                                 volume=volume, limit_price=entry_price)
+        wait(api, deadline=10)
+        print(f"  委托状态: {order.status}")
 
-        if volume > 0:
-            print(f"  卖开 {sym} 手数={volume} @ {entry_price}")
-            order = api.insert_order(sym, direction="SELL", offset="OPEN",
-                                     volume=volume, limit_price=entry_price)
-            wait(api, deadline=10)
-            print(f"  委托状态: {order.status}")
-
-        # 买尾部保险
-        print(f"\n  买入尾部保险（远OTM Put, Delta≈0.10）...")
-        ins = sys._buy_tail_insurance(underlying)
+        # 买尾部保险（卖Call→买远OTM Call，卖Put→买远OTM Put）
+        ins_cp = "CALL" if cp == "CALL" else "PUT"
+        print(f"\n  买入尾部保险（远OTM {ins_cp}, Delta≈0.10）...")
+        ins = strategy._buy_tail_insurance(underlying, direction)
         if ins:
             print(f"  保险腿: {ins}")
         else:
@@ -155,9 +176,8 @@ def main():
         print("【步骤4】持仓登记 & 阶段监控")
         print("=" * 60)
         if volume > 0:
-            from seller_greeks_system import PositionManager
             manager = PositionManager(api, entry_price)
-            sys.positions[sym] = {
+            strategy.positions[sym] = {
                 "entry_premium": entry_price,
                 "manager": manager,
                 "stage": 1,
@@ -167,8 +187,8 @@ def main():
             # 记录三阶 Greeks 建仓基线（相对倍数爆炸判定）
             manager.capture_baseline(sym)
             # 运行一次持仓监控
-            sys.stage_two_manage()
-            sys.stage_three_hard_exit()
+            strategy.stage_two_manage()
+            strategy.stage_three_hard_exit()
 
         # ===== 账户状态 =====
         print("\n" + "=" * 60)
@@ -192,7 +212,7 @@ def main():
         print("\n" + "=" * 60)
         print("【交易学习日志】")
         print("=" * 60)
-        for r in sys.trade_log:
+        for r in strategy.trade_log:
             print(f"  {r['time'][:19]} {r['action']:15s} {r['symbol']:25s} {r['detail']}")
 
     finally:
