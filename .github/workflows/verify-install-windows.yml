@@ -14,7 +14,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Invoke-WebRequest -Uri "https://github.com/MANAMM123/Tqsdk/releases/download/v1.0.2/OptionRadar-Windows.zip" -OutFile "$env:RUNNER_TEMP\app.zip"
+          Invoke-WebRequest -Uri "https://github.com/MANAMM123/Tqsdk/releases/latest/download/OptionRadar-Windows.zip" -OutFile "$env:RUNNER_TEMP\app.zip"
           Expand-Archive "$env:RUNNER_TEMP\app.zip" -DestinationPath "$env:RUNNER_TEMP\pkg" -Force
 
       - name: Diagnose shortcut COM
