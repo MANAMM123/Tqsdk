@@ -549,6 +549,7 @@ class App:
         top = tk.Frame(parent, bg=BG)
         top.pack(fill="x", padx=10, pady=8)
         self._mk_btn(top, "期限结构", self._on_term_structure, ACCENT, "#111").pack(side="left")
+        self._mk_btn(top, "导出图片", lambda: self._export_figure(self.skew_chart, "skew")).pack(side="left", padx=6)
         self.skew_summary = tk.Label(top, text="", bg=BG, fg=MUTED, font=(self.mono_font, 9), justify="left")
         self.skew_summary.pack(side="left", padx=12)
 
@@ -566,6 +567,7 @@ class App:
         top = tk.Frame(parent, bg=BG)
         top.pack(fill="x", padx=10, pady=8)
         self._mk_btn(top, "刷新锥", self._on_query_chain, ACCENT, "#111").pack(side="left")
+        self._mk_btn(top, "导出图片", lambda: self._export_figure(self.cone_chart, "cone")).pack(side="left", padx=6)
         self.cone_info = tk.Label(top, text="", bg=BG, fg=MUTED, font=(self.mono_font, 9))
         self.cone_info.pack(side="left", padx=12)
 
@@ -582,8 +584,10 @@ class App:
     def _build_history(self, parent):
         top = tk.Frame(parent, bg=BG)
         top.pack(fill="x", padx=10, pady=8)
+        self._mk_btn(top, "刷新历史", self._on_query_chain, ACCENT, "#111").pack(side="left")
+        self._mk_btn(top, "导出图片", lambda: self._export_figure(self.history_chart, "history")).pack(side="left", padx=6)
         tk.Label(top, text="Call Wall / Put Wall / 零伽马位 历史轨迹（本地记录，每日一条）",
-                 bg=BG, fg=MUTED, font=(self.font_name, 9)).pack(side="left")
+                 bg=BG, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=12)
 
         self.history_chart = ChartPanel(parent, figsize=(7.2, 3.6))
         self.history_chart.frame.pack(fill="both", expand=True, padx=10, pady=8)
@@ -706,8 +710,11 @@ class App:
         return prod, key
 
     def _on_refresh(self):
-        if self._current_page == "跨市场":
+        page = self._current_page
+        if page == "跨市场":
             self._on_cross_compare()
+        elif page == "概览":
+            self._on_scan()
         else:
             self._on_query_chain()
 
@@ -726,7 +733,17 @@ class App:
         self._refresh_job = self.root.after(sec * 1000, self._auto_refresh)
 
     def _auto_refresh(self):
-        if self.connected and self._current_page in ("概览", "期权链", "GEX分析", "偏度", "波动率锥", "历史"):
+        if not self.connected:
+            sec = self.cfg.get("refresh_sec", 0)
+            if sec > 0:
+                self._schedule_refresh(sec)
+            return
+        page = self._current_page
+        if page == "跨市场":
+            self._on_cross_compare()
+        elif page == "概览":
+            self._on_scan()
+        elif page in ("期权链", "GEX分析", "偏度", "波动率锥", "历史"):
             self._on_query_chain(silent=True)
         sec = self.cfg.get("refresh_sec", 0)
         if sec > 0:
@@ -862,34 +879,78 @@ class App:
         if ax is not None and gex is not None and not gex.empty:
             strikes = gex["strike"].values
             net = gex["net_gex"].values
-            colors = [GREEN if v >= 0 else RED for v in net]
-            bars = ax.bar(strikes, net / 1e8, color=colors, width=(strikes[-1] - strikes[0]) / max(len(strikes) * 1.6, 1),
-                          alpha=0.85, label="净GEX(亿)")
-            ax2 = ax.twinx()
             cum = gex["cum_net_gex"].values
-            ax2.plot(strikes, cum / 1e8, color=CYAN, linewidth=1.6, label="累计净GEX(亿)")
+            n = len(strikes)
+
+            # 柱：按净GEX符号上色，按幅度设透明度（更暗=更大）
+            abs_net = np.abs(net)
+            max_abs = abs_net.max() if abs_net.max() > 0 else 1.0
+            bar_colors = []
+            for v, a in zip(net, abs_net):
+                if v >= 0:
+                    alpha = 0.35 + 0.6 * (a / max_abs)
+                    bar_colors.append((0.0, 0.84, 0.56, alpha))  # GREEN
+                else:
+                    alpha = 0.35 + 0.6 * (a / max_abs)
+                    bar_colors.append((1.0, 0.23, 0.23, alpha))  # RED
+            step = (strikes[-1] - strikes[0]) / max(n - 1, 1) if n > 1 else 1.0
+            width = step * 0.62
+            ax.bar(strikes, net / 1e8, color=bar_colors, width=width, edgecolor="none",
+                   label="净GEX(亿)")
+            ax.axhline(0, color=BORDER, linewidth=0.8)
+
+            # 累计净GEX：白色粗线 + 下方淡色填充，与零伽马竖线区分
+            ax2 = ax.twinx()
+            ax2.plot(strikes, cum / 1e8, color=FG, linewidth=2.0, zorder=3, label="累计净GEX(亿)")
+            ax2.fill_between(strikes, 0, cum / 1e8, color=CYAN, alpha=0.10, zorder=1)
             ax2.axhline(0, color=BORDER, linewidth=0.8)
-            # 关键价位竖线
+
+            # 关键价位竖线：精简标注，避免重叠
             markers = [
-                (m["call_wall"], GREEN, "Call Wall"),
-                (m["put_wall"], RED, "Put Wall"),
-                (m["gamma_wall"], YELLOW, "Gamma Wall"),
-                (m["vol_trigger"], PURPLE, "Vol Trigger"),
-                (m["zero_gamma"], CYAN, "Zero Gamma"),
+                (m["zero_gamma"], CYAN, "ZG", "Zero Gamma"),
+                (m["call_wall"], GREEN, "CW", "Call Wall"),
+                (m["put_wall"], RED, "PW", "Put Wall"),
+                (m["gamma_wall"], YELLOW, "GW", "Gamma Wall"),
+                (m["vol_trigger"], PURPLE, "VT", "Vol Trigger"),
             ]
-            for strike, color, label in markers:
-                if _valid(strike):
-                    ax.axvline(strike, color=color, linestyle="--", linewidth=1, alpha=0.85)
-                    y = net.max() / 1e8 * 0.9
-                    ax.text(strike, y, f"{label}\n{fnum(strike, 1)}", color=color,
-                            fontsize=7, ha="center", va="top")
-            ax.axvline(F, color=FG, linestyle=":", linewidth=1.2, alpha=0.6)
-            ax.text(F, net.min() / 1e8 * 0.9, f"F={fnum(F, 1)}", color=FG, fontsize=7, ha="center")
+            y_top = net.max() / 1e8 * 0.92 if net.max() > 0 else 0.05
+            valid = [(s, c, l) for s, c, l, _ in markers if _valid(s)]
+            # 简单去重：相邻标签错开上下
+            label_y = []
+            for s, c, l in valid:
+                ax.axvline(s, color=c, linestyle="--", linewidth=1.1, alpha=0.9)
+                # 选择上下位置避免重叠
+                placed_below = any(abs(s - s2) < step * 1.5 for s2 in label_y)
+                yy = y_top * (0.42 if placed_below else 0.96)
+                label_y.append(s)
+                ax.text(s, yy, f"{l}\n{fnum(s, 1)}", color=c, fontsize=6.5,
+                        ha="center", va="top",
+                        bbox=dict(boxstyle="round,pad=0.15", fc=CARD, ec=c, lw=0.6, alpha=0.92))
+
+            # 现价 F：琥珀色实线，最醒目
+            ax.axvline(F, color=ACCENT, linestyle="-", linewidth=1.8, alpha=0.95, zorder=4)
+            ax.text(F, net.min() / 1e8 * 0.88 if net.min() < 0 else -0.05,
+                    f"F={fnum(F, 1)}", color=ACCENT, fontsize=8, ha="center", va="top",
+                    fontweight="bold")
+
             ax.set_xlabel("行权价", color=MUTED, fontsize=8)
             ax.set_ylabel("净GEX (亿)", color=MUTED, fontsize=8)
-            ax2.set_ylabel("累计净GEX (亿)", color=CYAN, fontsize=8)
-            ax2.tick_params(axis="y", colors=CYAN, labelsize=8)
-            ax.set_title("GEX 分布与累计净GEX（含四大关键价位）", color=FG, fontsize=10)
+            ax2.set_ylabel("累计净GEX (亿)", color=FG, fontsize=8)
+            ax2.tick_params(axis="y", colors=FG, labelsize=8)
+            ax.tick_params(axis="y", colors=MUTED, labelsize=8)
+            ax.set_title("GEX 分布 · 累计净GEX · 五大关键价位", color=FG, fontsize=9.5, pad=6)
+
+            # 小图例
+            from matplotlib.patches import Patch
+            from matplotlib.lines import Line2D
+            handles = [
+                Patch(facecolor=GREEN, edgecolor="none", alpha=0.8, label="净GEX>0"),
+                Patch(facecolor=RED, edgecolor="none", alpha=0.8, label="净GEX<0"),
+                Line2D([0], [0], color=FG, linewidth=2, label="累计净GEX"),
+                Line2D([0], [0], color=ACCENT, linewidth=1.8, label=f"现价 F={fnum(F, 1)}"),
+            ]
+            ax.legend(handles=handles, loc="upper left", fontsize=7, facecolor=CARD,
+                      edgecolor=BORDER, labelcolor=FG, framealpha=0.92, handlelength=1.6)
         self.gex_chart.draw()
 
         # 明细表
