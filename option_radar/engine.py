@@ -5,7 +5,9 @@ UI 线程只通过 submit() 提交任务并轮询 Future，所有 TqApi 调用�
 
 from __future__ import annotations
 
+import json
 import math
+import os
 import queue
 import re
 import threading
@@ -71,6 +73,11 @@ class Engine(threading.Thread):
         self._meta: dict[str, pd.DataFrame] = {}
         self._products: dict[str, list[dict]] = {}
         self._closes: dict[str, list[float]] = {}
+        self._long_closes: dict[str, list[float]] = {}
+        # 日内 PCR 追踪：key="exchange.product.expiry", value=[(ts, pcr, f)]
+        self._pcr_log: dict[str, list[tuple]] = {}
+        self._data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        os.makedirs(self._data_dir, exist_ok=True)
 
     # ---------------------------------------------------------------- runtime
     def submit(self, fn, *args, **kwargs) -> Future:
@@ -332,28 +339,29 @@ class Engine(threading.Thread):
                     break
         return "", float("nan")
 
-    def _closes_for(self, symbol: str, timeout: float = 10) -> list[float]:
+    def _closes_for(self, symbol: str, timeout: float = 10, length: int = 140) -> list[float]:
         if not symbol:
             return []
-        if symbol in self._closes:
-            return self._closes[symbol]
+        cache = self._long_closes if length > 140 else self._closes
+        if symbol in cache:
+            return cache[symbol]
         api = self._require_api()
         try:
-            klines = api.get_kline_serial(symbol, 86400, data_length=140)
+            klines = api.get_kline_serial(symbol, 86400, data_length=length)
         except Exception:
-            self._closes[symbol] = []
+            cache[symbol] = []
             return []
         deadline = time.time() + timeout
         closes: list[float] = []
         while time.time() < deadline:
             closes = [float(c) for c in klines["close"].tolist() if _finite(c)]
-            if len(closes) >= 25:
+            if len(closes) >= min(25, length):
                 break
             try:
                 api.wait_update(deadline=min(time.time() + 0.4, deadline))
             except Exception:
                 break
-        self._closes[symbol] = closes
+        cache[symbol] = closes
         return closes
 
     # ---------------------------------------------------------------- chain
@@ -442,6 +450,21 @@ class Engine(threading.Thread):
         metrics = calc.summary_metrics(chain, F, hv20, hv60)
         gex = calc.gex_table(chain)
 
+        # 波动率锥：用更长的历史（300 日）
+        long_closes = self._closes_for(spot_for_hv, length=300)
+        if not long_closes and exchange == "CFFEX":
+            long_closes = self._closes_for(f"KQ.m@{CFFEX_FUTURE.get(product, '')}", length=300)
+        cone = calc.vol_cone(long_closes, current_iv=metrics["atm_iv"])
+
+        # 日内 PCR 追踪
+        key = f"{exchange}.{product}.{expiry_key}"
+        self._pcr_log.setdefault(key, []).append((time.time(), metrics["pcr_oi"], F))
+        pcr_series = pd.DataFrame(self._pcr_log[key], columns=["ts", "pcr", "F"])
+        pcr_series["time"] = pd.to_datetime(pcr_series["ts"], unit="s").dt.strftime("%H:%M:%S")
+
+        # 记录每日关键价位历史
+        self._record_key_levels(exchange, product, expiry_key, metrics, F)
+
         # 合约级 GEX 占比（按行权价净 GEX 份额）
         share_map = {}
         if not gex.empty:
@@ -462,6 +485,8 @@ class Engine(threading.Thread):
             "chain": chain,
             "gex": gex,
             "metrics": metrics,
+            "cone": cone,
+            "pcr_series": pcr_series,
         }
 
     @staticmethod
@@ -566,3 +591,89 @@ class Engine(threading.Thread):
         if not rows:
             raise RuntimeError("未获取到任何到期日的期权数据。")
         return pd.DataFrame(rows).sort_values("days").reset_index(drop=True)
+
+    # ---------------------------------------------------------------- history / cone / compare
+    def _history_path(self, exchange: str, product: str, expiry_key: str) -> str:
+        safe = f"{exchange}_{product}_{expiry_key}"
+        return os.path.join(self._data_dir, f"history_{safe}.json")
+
+    def _record_key_levels(self, exchange: str, product: str, expiry_key: str, metrics: dict, F: float):
+        """把当日关键价位追加到本地历史文件（同一交易日只保留最后一条）。"""
+        path = self._history_path(exchange, product, expiry_key)
+        today = datetime.now().strftime("%Y-%m-%d")
+        data = []
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:
+                data = []
+        rec = {
+            "date": today,
+            "F": F,
+            "call_wall": metrics.get("call_wall"),
+            "put_wall": metrics.get("put_wall"),
+            "gamma_wall": metrics.get("gamma_wall"),
+            "vol_trigger": metrics.get("vol_trigger"),
+            "zero_gamma": metrics.get("zero_gamma"),
+            "atm_iv": metrics.get("atm_iv"),
+            "hv20": metrics.get("hv20"),
+            "pcr_oi": metrics.get("pcr_oi"),
+        }
+        # 同一交易日覆盖
+        if data and data[-1].get("date") == today:
+            data[-1] = rec
+        else:
+            data.append(rec)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data[-180:], fh, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def load_history(self, exchange: str, product: str, expiry_key: str) -> pd.DataFrame:
+        """读取关键价位历史（用于 Call Wall 等历史轨迹）。"""
+        path = self._history_path(exchange, product, expiry_key)
+        if not os.path.exists(path):
+            return pd.DataFrame()
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return pd.DataFrame()
+        if not data:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        return df.sort_values("date").reset_index(drop=True)
+
+    def pcr_series(self, exchange: str, product: str, expiry_key: str) -> pd.DataFrame:
+        """返回当前会话内的日内 PCR 序列。"""
+        key = f"{exchange}.{product}.{expiry_key}"
+        rows = self._pcr_log.get(key, [])
+        if not rows:
+            return pd.DataFrame(columns=["time", "pcr", "F"])
+        df = pd.DataFrame(rows, columns=["ts", "pcr", "F"])
+        df["time"] = pd.to_datetime(df["ts"], unit="s").dt.strftime("%H:%M:%S")
+        return df[["time", "pcr", "F"]]
+
+    def cross_exchange_compare(self, product_keyword: str = "") -> pd.DataFrame:
+        """跨交易所对比：扫描四大交易所，返回合并概览（可按品种名过滤）。"""
+        frames = []
+        for ex in EXCHANGES:
+            try:
+                self.notify("status", f"扫描 {EXCHANGES[ex]}…")
+                df = self.scan_exchange(ex)
+            except Exception as exc:  # noqa: BLE001
+                self.notify("status", f"{EXCHANGES[ex]} 跳过：{exc}")
+                continue
+            df.insert(0, "exchange", ex)
+            df.insert(1, "exchange_name", EXCHANGES[ex])
+            frames.append(df)
+        if not frames:
+            raise RuntimeError("所有交易所扫描失败。")
+        out = pd.concat(frames, ignore_index=True)
+        if product_keyword:
+            out = out[out["product"].str.lower().str.contains(product_keyword.lower(), na=False)]
+        out["gex_rank_all"] = out["net_gex"].abs().rank(ascending=False, method="min").astype(int)
+        out = out.sort_values("gex_rank_all").reset_index(drop=True)
+        return out

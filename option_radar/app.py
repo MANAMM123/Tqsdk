@@ -1,6 +1,5 @@
-"""期权波动率雷达 · TQSDK 桌面端
+"""期权波动率雷达 · TQSDK 桌面端（专业终端风）
 
-按交易所查询期权链，计算 IV / HV / 25Δ偏度 / GEX，并给出排名与占比。
 运行：python app.py
 """
 
@@ -10,7 +9,6 @@ import json
 import math
 import os
 import queue
-import sys
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
@@ -32,30 +30,30 @@ try:
     from engine import EXCHANGES, Engine
 
     IMPORT_ERROR = None
-except Exception as _exc:  # tqsdk 未安装 / 版本不兼容
+except Exception as _exc:
     EXCHANGES = {"SHFE": "上期所", "DCE": "大商所", "CZCE": "郑商所", "CFFEX": "中金所"}
     Engine = None  # type: ignore[assignment]
     IMPORT_ERROR = _exc
 
-# 打包成可执行文件后，配置文件放在 exe 同目录，避免写入临时解包目录
-BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(__import__("sys"), "frozen", False):
+    BASE_DIR = os.path.dirname(__import__("sys").executable)
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-# 密码等敏感信息只从环境变量读取，不落盘
-ENV_USERNAME = "TQ_USERNAME"
-ENV_PASSWORD = "TQ_PASSWORD"
-ENV_RATE = "TQ_RISK_FREE_RATE"
-
-BG = "#0b0f14"
-PANEL = "#131a23"
-CARD = "#18212b"
+# ---- 终端风配色 ----
+BG = "#0a0e14"
+PANEL = "#131a21"
+CARD = "#16202a"
+CARD2 = "#1c2834"
 BORDER = "#263241"
 FG = "#e6edf3"
 MUTED = "#8b9bb0"
 ACCENT = "#f0b429"
-BLUE = "#58a6ff"
-UP = "#ff5c5c"
-DOWN = "#26a69a"
+CYAN = "#00b8d4"
+GREEN = "#00d68f"
+RED = "#ff3b3b"
+YELLOW = "#ffb000"
+PURPLE = "#b388ff"
 
 
 def _valid(x) -> bool:
@@ -90,7 +88,6 @@ def fpct(x, digits: int = 1, signed: bool = True) -> str:
 
 
 def fyi(x) -> str:
-    """把金额转成 亿 / 万。"""
     if not _valid(x):
         return "—"
     v = float(x)
@@ -101,41 +98,21 @@ def fyi(x) -> str:
     return f"{v:+.0f}"
 
 
-def fyiw(x) -> str:
-    if not _valid(x):
-        return "—"
-    return f"{float(x) / 1e4:,.1f}"
-
-
 def load_config() -> dict:
-    """读取配置：非敏感项来自 config.json，账号密码优先取环境变量。"""
-    cfg = {"username": "", "password": "", "risk_free_rate": 0.0}
+    cfg = {"username": "", "password": "", "risk_free_rate": 0.0, "favorites": [], "refresh_sec": 0}
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        for key in ("username", "risk_free_rate"):
-            if key in data:
-                cfg[key] = data[key]
+            cfg.update(json.load(fh))
     except Exception:
         pass
-
-    if os.environ.get(ENV_USERNAME, "").strip():
-        cfg["username"] = os.environ[ENV_USERNAME].strip()
-    if os.environ.get(ENV_PASSWORD, "").strip():
-        cfg["password"] = os.environ[ENV_PASSWORD].strip()
-    try:
-        if os.environ.get(ENV_RATE, "").strip():
-            cfg["risk_free_rate"] = float(os.environ[ENV_RATE].strip())
-    except ValueError:
-        pass
+    cfg.setdefault("favorites", [])
+    cfg.setdefault("refresh_sec", 0)
     return cfg
 
 
 def save_config(cfg: dict):
-    """只把非敏感项写入 config.json，密码永不落盘。"""
-    data = {"username": cfg.get("username", ""), "risk_free_rate": cfg.get("risk_free_rate", 0.0)}
     with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
+        json.dump(cfg, fh, ensure_ascii=False, indent=2)
     try:
         os.chmod(CONFIG_PATH, 0o600)
     except Exception:
@@ -143,46 +120,42 @@ def save_config(cfg: dict):
 
 
 class SettingsDialog(tk.Toplevel):
-    def __init__(self, parent, cfg: dict, on_save, font_name: str = "TkDefaultFont"):
+    def __init__(self, parent, font_name, cfg: dict, on_save):
         super().__init__(parent)
         self.title("快期账户设置")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.on_save = on_save
-        self.font_name = font_name
         self.transient(parent)
         self.grab_set()
 
         body = tk.Frame(self, bg=BG, padx=24, pady=20)
         body.pack(fill="both", expand=True)
         tk.Label(body, text="TQSDK 登录", bg=BG, fg=FG,
-                 font=(self.font_name, 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                 font=(font_name, 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
         tk.Label(body, text="使用快期账户（手机号 + 密码）登录，行情数据由天勤提供。",
-                 bg=BG, fg=MUTED, font=(self.font_name, 9)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 14))
+                 bg=BG, fg=MUTED, font=(font_name, 9)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 14))
 
-        tk.Label(body, text="账号", bg=BG, fg=MUTED, font=(self.font_name, 10)).grid(row=2, column=0, sticky="w")
+        tk.Label(body, text="账号", bg=BG, fg=MUTED, font=(font_name, 10)).grid(row=2, column=0, sticky="w")
         self.user_entry = tk.Entry(body, bg=CARD, fg=FG, insertbackground=FG, relief="flat",
-                                   font=(self.font_name, 11), width=28)
+                                   font=(font_name, 11), width=28)
         self.user_entry.grid(row=2, column=1, sticky="ew", padx=(10, 0), ipady=6)
         self.user_entry.insert(0, cfg.get("username", ""))
 
-        tk.Label(body, text="密码", bg=BG, fg=MUTED, font=(self.font_name, 10)).grid(row=3, column=0, sticky="w", pady=(10, 0))
+        tk.Label(body, text="密码", bg=BG, fg=MUTED, font=(font_name, 10)).grid(row=3, column=0, sticky="w", pady=(10, 0))
         self.pwd_entry = tk.Entry(body, bg=CARD, fg=FG, insertbackground=FG, relief="flat",
-                                  font=(self.font_name, 11), width=28, show="*")
+                                  font=(font_name, 11), width=28, show="*")
         self.pwd_entry.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=(10, 0), ipady=6)
-        self.pwd_entry.insert(0, cfg.get("password", ""))
 
-        tk.Label(body, text="账号保存到 config.json；密码不落盘，仅本次运行有效。\n"
-                           f"长期免输入可设置环境变量 {ENV_USERNAME} / {ENV_PASSWORD} 后启动。",
-                 bg=BG, fg=MUTED, font=(self.font_name, 8), justify="left").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        tk.Label(body, text="密码仅保存在内存，不写入磁盘。", bg=BG, fg=MUTED,
+                 font=(font_name, 8)).grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
         btns = tk.Frame(body, bg=BG)
         btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(18, 0))
         tk.Button(btns, text="取消", command=self.destroy, bg=PANEL, fg=FG, relief="flat",
-                  font=(self.font_name, 10), padx=16, pady=5, cursor="hand2").pack(side="left", padx=6)
+                  font=(font_name, 10), padx=16, pady=5, cursor="hand2").pack(side="left", padx=6)
         tk.Button(btns, text="保存并登录", command=self._save, bg=ACCENT, fg="#111111", relief="flat",
-                  font=(self.font_name, 10, "bold"), padx=16, pady=5, cursor="hand2").pack(side="left")
+                  font=(font_name, 10, "bold"), padx=16, pady=5, cursor="hand2").pack(side="left")
         self.bind("<Return>", lambda e: self._save())
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
@@ -200,7 +173,7 @@ class SettingsDialog(tk.Toplevel):
 
 
 class ChartPanel:
-    def __init__(self, parent, figsize=(5.4, 3.4)):
+    def __init__(self, parent, figsize=(6.0, 3.6)):
         self.frame = tk.Frame(parent, bg=CARD)
         self.figure = None
         self.canvas = None
@@ -241,11 +214,20 @@ class ChartPanel:
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
+    def save_png(self, path):
+        if not HAS_MPL or self.figure is None:
+            return
+        self.figure.savefig(path, dpi=150, facecolor=CARD, bbox_inches="tight")
+
+
+PAGES = ["概览", "期权链", "GEX分析", "偏度", "波动率锥", "历史", "跨市场"]
+
 
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.font_name = self._pick_font(root)
+        self.mono_font = self._pick_mono(root)
         self.cfg = load_config()
         self.engine: Engine | None = None
         self.ui_queue: queue.Queue = queue.Queue()
@@ -258,14 +240,19 @@ class App:
         self.df_chain: pd.DataFrame | None = None
         self.df_gex: pd.DataFrame | None = None
         self.df_skew: pd.DataFrame | None = None
+        self.df_cross: pd.DataFrame | None = None
+        self.df_history: pd.DataFrame | None = None
+        self._nav_buttons: dict[str, tk.Button] = {}
+        self._current_page = "概览"
+        self._refresh_job = None
+        self._last_refresh = ""
         self._action_widgets: list[tk.Widget] = []
-        self._sort_state: dict = {}
 
         self._setup_window()
         self._setup_style()
         self._build_ui()
         self._start_engine()
-        self.root.after(120, self._poll)
+        self.root.after(150, self._poll)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---------------------------------------------------------------- setup
@@ -277,10 +264,18 @@ class App:
                 return name
         return "TkDefaultFont"
 
+    def _pick_mono(self, root) -> str:
+        families = set(tkfont.families(root))
+        for name in ("Consolas", "Cascadia Mono", "JetBrains Mono", "Source Code Pro",
+                     "Menlo", "DejaVu Sans Mono", "Courier New"):
+            if name in families:
+                return name
+        return "TkDefaultFont"
+
     def _setup_window(self):
         self.root.title("期权波动率雷达 · TQSDK")
-        self.root.geometry("1440x900")
-        self.root.minsize(1200, 760)
+        self.root.geometry("1500x920")
+        self.root.minsize(1280, 760)
         self.root.configure(bg=BG)
         if HAS_MPL:
             matplotlib.rcParams["font.sans-serif"] = [self.font_name, "DejaVu Sans"]
@@ -296,689 +291,952 @@ class App:
         style.configure("Card.TFrame", background=CARD)
         style.configure("TLabel", background=BG, foreground=FG)
         style.configure("Muted.TLabel", background=BG, foreground=MUTED, font=(self.font_name, 9))
-        style.configure("Card.TLabel", background=CARD, foreground=FG, font=(self.font_name, 9))
-        style.configure("CardMuted.TLabel", background=CARD, foreground=MUTED, font=(self.font_name, 8))
-        style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 6, 0, 0))
-        style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(18, 9),
-                        font=(self.font_name, 10, "bold"))
+        style.configure("Card.TLabel", background=CARD, foreground=FG, font=(self.mono_font, 9))
+        style.configure("CardMuted.TLabel", background=CARD, foreground=MUTED, font=(self.mono_font, 8))
+        style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(14, 7),
+                        font=(self.font_name, 9, "bold"))
         style.map("TNotebook.Tab", background=[("selected", CARD)], foreground=[("selected", ACCENT)])
-        style.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=FG, rowheight=25,
-                        borderwidth=0, font=(self.font_name, 9))
+        style.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=FG, rowheight=22,
+                        borderwidth=0, font=(self.mono_font, 9))
         style.configure("Treeview.Heading", background=PANEL, foreground=MUTED, relief="flat",
-                        font=(self.font_name, 9, "bold"), padding=(4, 6))
+                        font=(self.mono_font, 8, "bold"))
         style.map("Treeview.Heading", background=[("active", BORDER)])
-        style.map("Treeview", background=[("selected", "#1f3a56")], foreground=[("selected", FG)])
+        style.map("Treeview", background=[("selected", BORDER)], foreground=[("selected", FG)])
         style.configure("TCombobox", fieldbackground=CARD, background=PANEL, foreground=FG,
-                        arrowcolor=FG, bordercolor=BORDER, lightcolor=CARD, darkcolor=CARD,
-                        insertcolor=FG, padding=5)
-        style.map("TCombobox", fieldbackground=[("readonly", CARD)],
-                  foreground=[("readonly", FG)], background=[("readonly", PANEL)])
-        style.configure("TProgressbar", background=ACCENT, troughcolor=PANEL, borderwidth=0, thickness=6)
-        style.configure("Vertical.TScrollbar", background=PANEL, troughcolor=BG, bordercolor=BG,
-                        arrowcolor=MUTED)
-        self.root.option_add("*TCombobox*Listbox.background", CARD)
-        self.root.option_add("*TCombobox*Listbox.foreground", FG)
-        self.root.option_add("*TCombobox*Listbox.selectBackground", BLUE)
+                        lightcolor=BORDER, darkcolor=BORDER, arrowcolor=FG)
+        style.map("TCombobox", fieldbackground=[("readonly", CARD)])
+        style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor=PANEL, bordercolor=BORDER,
+                        lightcolor=ACCENT, darkcolor=ACCENT)
+        style.configure("TSeparator", background=BORDER)
 
-    # ---------------------------------------------------------------- ui
+    # ---------------------------------------------------------------- UI
     def _build_ui(self):
-        header = tk.Frame(self.root, bg=BG, padx=20, pady=14)
-        header.pack(fill="x")
-        tk.Label(header, text="期权波动率雷达", bg=BG, fg=FG,
-                 font=(self.font_name, 20, "bold")).pack(side="left")
-        tk.Label(header, text="  TQSDK · 四大交易所期权  IV / HV / 25Δ SKEW / GEX",
-                 bg=BG, fg=MUTED, font=(self.font_name, 10)).pack(side="left", padx=(8, 0), pady=(8, 0))
+        self._build_toolbar()
+        main = tk.Frame(self.root, bg=BG)
+        main.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self._build_sidebar(main)
+        self._build_content(main)
 
-        self.account_btn = tk.Button(header, text="账户", command=self._open_settings, bg=CARD, fg=FG,
-                                     relief="flat", font=(self.font_name, 10, "bold"), padx=16, pady=5,
-                                     activebackground=BORDER, activeforeground=FG, cursor="hand2")
-        self.account_btn.pack(side="right")
-        self.state_label = tk.Label(header, text="● 未登录", bg=BG, fg=UP, font=(self.font_name, 10))
-        self.state_label.pack(side="right", padx=14)
+    def _build_toolbar(self):
+        bar = tk.Frame(self.root, bg=PANEL, height=54)
+        bar.pack(fill="x", padx=6, pady=(6, 0))
+        bar.pack_propagate(False)
 
-        toolbar = tk.Frame(self.root, bg=PANEL, padx=16, pady=12)
-        toolbar.pack(fill="x")
-        self.ex_buttons = {}
-        for code, label in EXCHANGES.items():
-            btn = tk.Button(toolbar, text=label, command=lambda c=code: self._switch_exchange(c),
-                            bg=CARD, fg=MUTED, relief="flat", font=(self.font_name, 10, "bold"),
-                            padx=14, pady=6, activebackground=BORDER, activeforeground=FG, cursor="hand2")
-            btn.pack(side="left", padx=(0, 6))
-            self.ex_buttons[code] = btn
-            self._action_widgets.append(btn)
+        left = tk.Frame(bar, bg=PANEL)
+        left.pack(side="left", fill="y", padx=10)
+        tk.Label(left, text="期权波动率雷达", bg=PANEL, fg=ACCENT,
+                 font=(self.font_name, 13, "bold")).pack(side="left")
+        self.status_lbl = tk.Label(left, text="未连接", bg=PANEL, fg=RED,
+                                   font=(self.font_name, 10))
+        self.status_lbl.pack(side="left", padx=(12, 0))
 
-        tk.Label(toolbar, text="品种", bg=PANEL, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=(14, 4))
-        self.product_box = ttk.Combobox(toolbar, width=12, state="readonly")
-        self.product_box.pack(side="left")
-        self.product_box.bind("<<ComboboxSelected>>", lambda e: self._on_product_change())
+        # 交易所按钮
+        exbar = tk.Frame(bar, bg=PANEL)
+        exbar.pack(side="left", padx=10)
+        self.ex_buttons: dict[str, tk.Button] = {}
+        for ex, name in EXCHANGES.items():
+            b = tk.Button(exbar, text=name, command=lambda e=ex: self._switch_exchange(e),
+                          bg=PANEL, fg=MUTED, relief="flat", activebackground=CARD, activeforeground=FG,
+                          font=(self.font_name, 10), padx=10, pady=4, cursor="hand2")
+            b.pack(side="left", padx=2)
+            self.ex_buttons[ex] = b
 
-        tk.Label(toolbar, text="到期", bg=PANEL, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=(12, 4))
-        self.expiry_box = ttk.Combobox(toolbar, width=22, state="readonly")
-        self.expiry_box.pack(side="left")
+        # 品种/到期
+        sel = tk.Frame(bar, bg=PANEL)
+        sel.pack(side="left", padx=10)
+        tk.Label(sel, text="品种", bg=PANEL, fg=MUTED, font=(self.font_name, 9)).pack(side="left")
+        self.product_combo = ttk.Combobox(sel, state="readonly", width=10, font=(self.mono_font, 10))
+        self.product_combo.pack(side="left", padx=4)
+        self.product_combo.bind("<<ComboboxSelected>>", lambda e: self._on_product_change())
+        tk.Label(sel, text="到期", bg=PANEL, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=(10, 0))
+        self.expiry_combo = ttk.Combobox(sel, state="readonly", width=10, font=(self.mono_font, 10))
+        self.expiry_combo.pack(side="left", padx=4)
+        self.expiry_combo.bind("<<ComboboxSelected>>", lambda e: self._on_expiry_change())
 
-        self.query_btn = tk.Button(toolbar, text="查询期权链", command=self._query_chain, bg=ACCENT, fg="#111111",
-                                   relief="flat", font=(self.font_name, 10, "bold"), padx=16, pady=6,
-                                   activebackground="#d9a11f", activeforeground="#111111", cursor="hand2")
-        self.query_btn.pack(side="left", padx=(14, 6))
-        self.scan_btn = tk.Button(toolbar, text="扫描全品种", command=self._scan, bg=BLUE, fg="#0b1622",
-                                  relief="flat", font=(self.font_name, 10, "bold"), padx=16, pady=6,
-                                  activebackground="#3f8fe0", activeforeground="#0b1622", cursor="hand2")
-        self.scan_btn.pack(side="left", padx=6)
-        self.export_btn = tk.Button(toolbar, text="导出 CSV", command=self._export, bg=CARD, fg=FG,
-                                    relief="flat", font=(self.font_name, 10), padx=14, pady=6,
-                                    activebackground=BORDER, activeforeground=FG, cursor="hand2")
-        self.export_btn.pack(side="left", padx=6)
-        self._action_widgets += [self.product_box, self.expiry_box, self.query_btn, self.scan_btn, self.export_btn]
+        # 刷新间隔
+        tk.Label(bar, text="刷新", bg=PANEL, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=(10, 0))
+        self.refresh_combo = ttk.Combobox(bar, values=["关", "5s", "10s", "15s", "30s"], width=5, state="readonly")
+        self.refresh_combo.set("关" if self.cfg.get("refresh_sec", 0) == 0 else f"{self.cfg['refresh_sec']}s")
+        self.refresh_combo.pack(side="left", padx=4)
+        self.refresh_combo.bind("<<ComboboxSelected>>", lambda e: self._on_refresh_interval_change())
 
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=14, pady=(10, 0))
+        self.refresh_btn = self._mk_btn(bar, "刷新", self._on_refresh, CYAN)
+        self.refresh_btn.pack(side="left", padx=4)
+        self._action_widgets.append(self.refresh_btn)
 
-        self._build_overview_tab()
-        self._build_chain_tab()
-        self._build_gex_tab()
-        self._build_skew_tab()
+        self.fav_btn = self._mk_btn(bar, "★ 加自选", self._add_favorite, YELLOW, "#111")
+        self.fav_btn.pack(side="left", padx=4)
 
-        status = tk.Frame(self.root, bg=BG, padx=16, pady=8)
-        status.pack(fill="x")
-        self.progress = ttk.Progressbar(status, mode="determinate", length=180)
-        self.progress.pack(side="right")
-        self.status_var = tk.StringVar(value="启动中…")
-        tk.Label(status, textvariable=self.status_var, bg=BG, fg=MUTED, anchor="w",
-                 font=(self.font_name, 9)).pack(side="left", fill="x", expand=True)
+        self.time_lbl = tk.Label(bar, text="", bg=PANEL, fg=MUTED, font=(self.mono_font, 9))
+        self.time_lbl.pack(side="left", padx=8)
 
-        self._switch_exchange_visual("SHFE")
+        right = tk.Frame(bar, bg=PANEL)
+        right.pack(side="right", padx=10)
+        self.alert_lbl = tk.Label(right, text="", bg=PANEL, fg=YELLOW, font=(self.font_name, 9, "bold"))
+        self.alert_lbl.pack(side="right", padx=8)
+        self.settings_btn = self._mk_btn(right, "账户", self._open_settings, CARD2)
+        self.settings_btn.pack(side="right", padx=4)
 
-    def _new_tree(self, parent, columns, height=18):
-        frame = tk.Frame(parent, bg=CARD)
-        tree = ttk.Treeview(frame, columns=[c[0] for c in columns], show="headings", height=height)
-        for key, title, width in columns:
-            tree.heading(key, text=title, command=lambda k=key: self._sort_tree(tree, k))
-            tree.column(key, width=width, anchor="e" if key not in ("product", "instrument_id", "option_class",
-                                                                   "expiry", "name") else "w", stretch=False)
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        hsb = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
-        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        frame.rowconfigure(0, weight=1)
-        frame.columnconfigure(0, weight=1)
-        tree.tag_configure("neg", foreground=DOWN)
-        tree.tag_configure("pos", foreground=UP)
-        for tag in ("zero", "one"):
-            tree.tag_configure(tag, background=CARD)
-        return frame, tree
+    def _mk_btn(self, parent, text, cmd, color=PANEL, fg_color=FG) -> tk.Button:
+        b = tk.Button(parent, text=text, command=cmd, bg=color, fg=fg_color, relief="flat",
+                      activebackground=BORDER, activeforeground=FG, font=(self.font_name, 9),
+                      padx=12, pady=5, cursor="hand2")
+        return b
 
-    def _build_overview_tab(self):
-        tab = tk.Frame(self.notebook, bg=BG)
-        self.notebook.add(tab, text="  品种概览  ")
-        top = tk.Frame(tab, bg=BG, pady=8)
-        top.pack(fill="x")
-        tk.Label(top, text="按交易所扫描各品种最近到期期权，按 |净 GEX| 排名；占比为各品种净 GEX 绝对值占全部品种之和。",
+    def _build_sidebar(self, parent):
+        side = tk.Frame(parent, bg=PANEL, width=150)
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+
+        tk.Label(side, text="导航", bg=PANEL, fg=MUTED, font=(self.font_name, 9, "bold")).pack(
+            anchor="w", padx=12, pady=(12, 4))
+        for name in PAGES:
+            b = tk.Button(side, text="  " + name, command=lambda n=name: self._show_page(n),
+                          bg=PANEL, fg=FG, relief="flat", anchor="w", activebackground=CARD, activeforeground=ACCENT,
+                          font=(self.font_name, 10), padx=14, pady=8, cursor="hand2")
+            b.pack(fill="x")
+            self._nav_buttons[name] = b
+
+        ttk.Separator(side, orient="horizontal").pack(fill="x", padx=8, pady=8)
+        tk.Label(side, text="自选", bg=PANEL, fg=MUTED, font=(self.font_name, 9, "bold")).pack(
+            anchor="w", padx=12, pady=(0, 4))
+        self.fav_frame = tk.Frame(side, bg=PANEL)
+        self.fav_frame.pack(fill="x", padx=4)
+        self._refresh_favorites()
+
+    def _build_content(self, parent):
+        self.notebook = ttk.Notebook(parent)
+        self.notebook.pack(fill="both", expand=True, padx=(6, 0))
+        # 取消 notebook tab 显示，用侧边栏切换
+        self.notebook.configure(padding=0)
+
+        self._page_overview = tk.Frame(self.notebook, bg=BG)
+        self._page_chain = tk.Frame(self.notebook, bg=BG)
+        self._page_gex = tk.Frame(self.notebook, bg=BG)
+        self._page_skew = tk.Frame(self.notebook, bg=BG)
+        self._page_cone = tk.Frame(self.notebook, bg=BG)
+        self._page_history = tk.Frame(self.notebook, bg=BG)
+        self._page_cross = tk.Frame(self.notebook, bg=BG)
+
+        for name, page in zip(PAGES, [self._page_overview, self._page_chain, self._page_gex,
+                                      self._page_skew, self._page_cone, self._page_history, self._page_cross]):
+            self.notebook.add(page, text=name)
+
+        self._build_overview(self._page_overview)
+        self._build_chain(self._page_chain)
+        self._build_gex(self._page_gex)
+        self._build_skew(self._page_skew)
+        self._build_cone(self._page_cone)
+        self._build_history(self._page_history)
+        self._build_cross(self._page_cross)
+        self._show_page("概览")
+
+    # ---- 概览 ----
+    def _build_overview(self, parent):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", padx=10, pady=8)
+        self._mk_btn(top, "扫描全品种", self._on_scan, ACCENT, "#111").pack(side="left")
+        self._mk_btn(top, "导出 CSV", self._on_export_overview).pack(side="left", padx=6)
+        tk.Label(top, text="双击行跳转期权链", bg=BG, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=12)
+
+        body = tk.Frame(parent, bg=BG)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        cols = ["gex_rank", "product", "expiry", "days", "F", "atm_iv", "hv20", "iv_hv_pct",
+                "skew_pct", "net_gex", "zero_gamma", "pcr_oi", "iv_percentile"]
+        self.overview_tree = self._mk_tree(body, cols, widths=[55, 60, 55, 45, 80, 65, 65, 80, 80, 95, 80, 70, 75],
+                                           titles=["排名", "品种", "到期", "天数", "标的F", "ATM IV", "HV20", "IV-HV%",
+                                                   "偏度%", "净GEX", "零伽马", "PCR%", "IV分位%"])
+        self.overview_tree.bind("<Double-1>", self._on_overview_double)
+
+    # ---- 期权链 ----
+    def _build_chain(self, parent):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", padx=10, pady=8)
+        self._mk_btn(top, "查询期权链", self._on_query_chain, ACCENT, "#111").pack(side="left")
+        self._mk_btn(top, "导出 CSV", self._on_export_chain).pack(side="left", padx=6)
+        self.chain_info = tk.Label(top, text="", bg=BG, fg=MUTED, font=(self.mono_font, 9))
+        self.chain_info.pack(side="left", padx=12)
+
+        body = tk.Frame(parent, bg=BG)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        cols = ["strike", "option_class", "price", "iv", "delta", "gamma", "vanna", "vega",
+                "open_interest", "gex", "gex_share_pct"]
+        self.chain_tree = self._mk_tree(body, cols, widths=[70, 60, 80, 70, 70, 80, 80, 70, 90, 95, 80],
+                                        titles=["行权价", "类型", "价格", "IV", "Delta", "Gamma", "Vanna", "Vega",
+                                                "持仓量", "GEX", "GEX占比%"])
+        self.chain_tree.tag_configure("CALL", foreground=GREEN)
+        self.chain_tree.tag_configure("PUT", foreground=RED)
+
+    # ---- GEX 仪表盘 ----
+    def _build_gex(self, parent):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", padx=10, pady=8)
+        self._mk_btn(top, "查询GEX", self._on_query_chain, ACCENT, "#111").pack(side="left")
+        self._mk_btn(top, "导出图片", lambda: self._export_figure(self.gex_chart, "gex")).pack(side="left", padx=6)
+        self.gex_info = tk.Label(top, text="", bg=BG, fg=MUTED, font=(self.mono_font, 9))
+        self.gex_info.pack(side="left", padx=12)
+
+        # 4 个 KPI 卡
+        kpi = tk.Frame(parent, bg=BG)
+        kpi.pack(fill="x", padx=10)
+        self.kpi_cards: dict[str, dict] = {}
+        for key in ["net_gex", "zero_gamma", "call_wall", "put_wall"]:
+            self.kpi_cards[key] = self._make_kpi_card(kpi, key)
+
+        # 关键价位卡片（参考图样式）
+        lvl = tk.Frame(parent, bg=BG)
+        lvl.pack(fill="x", padx=10, pady=(8, 0))
+        self.level_cards: dict[str, dict] = {}
+        for key in ["call_wall", "put_wall", "gamma_wall", "vol_trigger"]:
+            self.level_cards[key] = self._make_level_card(lvl, key)
+
+        # PCR 日内变化
+        pcr_wrap = tk.Frame(parent, bg=BG)
+        pcr_wrap.pack(fill="x", padx=10, pady=(6, 0))
+        tk.Label(pcr_wrap, text="PCR 日内变化（Put OI / Call OI）", bg=BG, fg=MUTED,
+                 font=(self.font_name, 8, "bold")).pack(anchor="w")
+        self.pcr_chart = ChartPanel(pcr_wrap, figsize=(7.2, 1.4))
+        self.pcr_chart.frame.pack(fill="x")
+
+        # 图表
+        self.gex_chart = ChartPanel(parent, figsize=(7.2, 3.6))
+        self.gex_chart.frame.pack(fill="both", expand=True, padx=10, pady=8)
+
+        # 明细表
+        body = tk.Frame(parent, bg=BG)
+        body.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+        cols = ["strike", "call_gex", "put_gex", "net_gex", "oi", "share_pct", "cum_share_pct", "cum_net_gex"]
+        self.gex_tree = self._mk_tree(body, cols, widths=[70, 90, 90, 90, 80, 70, 80, 95],
+                                      titles=["行权价", "Call GEX", "Put GEX", "净GEX", "持仓", "占比%", "累计占比%", "累计净GEX"])
+        self.gex_tree.bind("<Double-1>", self._on_gex_double)
+
+    def _make_kpi_card(self, parent, key: str) -> dict:
+        colors = {"net_gex": (CYAN, "净GEX"), "zero_gamma": (YELLOW, "零伽马位"),
+                  "call_wall": (GREEN, "看涨阻力 Call Wall"), "put_wall": (RED, "看跌支撑 Put Wall")}
+        color, label = colors[key]
+        card = tk.Frame(parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        card.pack(side="left", expand=True, fill="x", padx=3)
+        tk.Label(card, text=label, bg=CARD, fg=MUTED, font=(self.font_name, 8)).pack(anchor="w", padx=8, pady=(5, 0))
+        val = tk.Label(card, text="—", bg=CARD, fg=color, font=(self.mono_font, 16, "bold"))
+        val.pack(anchor="w", padx=8, pady=(1, 0))
+        sub = tk.Label(card, text="", bg=CARD, fg=MUTED, font=(self.mono_font, 8))
+        sub.pack(anchor="w", padx=8, pady=(0, 5))
+        return {"card": card, "val": val, "sub": sub, "color": color}
+
+    def _make_level_card(self, parent, key: str) -> dict:
+        palette = {
+            "call_wall": (GREEN, "① 看涨阻力位", "Call Wall", "价格向上易遇天花板"),
+            "put_wall": (RED, "② 看跌支撑位", "Put Wall", "价格向下易托住地板"),
+            "gamma_wall": (YELLOW, "③ 伽马关键位", "Gamma Wall", "价格容易被钉住波动收敛"),
+            "vol_trigger": (PURPLE, "④ 波动变化位", "Vol Trigger", "市场可能从收敛切换为放大"),
+        }
+        color, title, en, hint = palette[key]
+        card = tk.Frame(parent, bg=CARD, highlightbackground=color, highlightthickness=2)
+        card.pack(side="left", expand=True, fill="x", padx=3, pady=4)
+        head = tk.Frame(card, bg=CARD)
+        head.pack(fill="x", padx=8, pady=(5, 0))
+        tk.Label(head, text=title, bg=CARD, fg=color, font=(self.font_name, 9, "bold")).pack(side="left")
+        tk.Label(head, text=en, bg=CARD, fg=MUTED, font=(self.mono_font, 8)).pack(side="right")
+        val = tk.Label(card, text="—", bg=CARD, fg=FG, font=(self.mono_font, 15, "bold"))
+        val.pack(anchor="w", padx=8, pady=(2, 0))
+        sub = tk.Label(card, text=hint, bg=CARD, fg=MUTED, font=(self.font_name, 8), wraplength=150, justify="left")
+        sub.pack(anchor="w", padx=8, pady=(0, 5))
+        return {"val": val, "sub": sub, "card": card, "color": color}
+
+    # ---- 偏度 ----
+    def _build_skew(self, parent):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", padx=10, pady=8)
+        self._mk_btn(top, "期限结构", self._on_term_structure, ACCENT, "#111").pack(side="left")
+        self.skew_summary = tk.Label(top, text="", bg=BG, fg=MUTED, font=(self.mono_font, 9), justify="left")
+        self.skew_summary.pack(side="left", padx=12)
+
+        self.skew_chart = ChartPanel(parent, figsize=(7.2, 3.2))
+        self.skew_chart.frame.pack(fill="x", padx=10, pady=8)
+
+        body = tk.Frame(parent, bg=BG)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        cols = ["expiry", "days", "F", "atm_iv", "hv20", "iv_hv_pct", "skew_25d", "skew_pct", "net_gex"]
+        self.skew_tree = self._mk_tree(body, cols, widths=[55, 45, 80, 65, 65, 80, 80, 70, 90],
+                                       titles=["到期", "天数", "F", "ATM IV", "HV20", "IV-HV%", "25Δ偏度", "偏度%", "净GEX"])
+
+    # ---- 波动率锥 ----
+    def _build_cone(self, parent):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", padx=10, pady=8)
+        self._mk_btn(top, "刷新锥", self._on_query_chain, ACCENT, "#111").pack(side="left")
+        self.cone_info = tk.Label(top, text="", bg=BG, fg=MUTED, font=(self.mono_font, 9))
+        self.cone_info.pack(side="left", padx=12)
+
+        self.cone_chart = ChartPanel(parent, figsize=(7.2, 3.6))
+        self.cone_chart.frame.pack(fill="both", expand=True, padx=10, pady=8)
+
+        body = tk.Frame(parent, bg=BG)
+        body.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+        cols = ["window", "mean", "p10", "p25", "p50", "p75", "p90", "current"]
+        self.cone_tree = self._mk_tree(body, cols, widths=[60, 70, 70, 70, 70, 70, 70, 70],
+                                       titles=["窗口", "均值", "P10", "P25", "P50", "P75", "P90", "当前HV"])
+
+    # ---- 历史 ----
+    def _build_history(self, parent):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", padx=10, pady=8)
+        tk.Label(top, text="Call Wall / Put Wall / 零伽马位 历史轨迹（本地记录，每日一条）",
                  bg=BG, fg=MUTED, font=(self.font_name, 9)).pack(side="left")
-        tk.Label(top, text="双击行可跳到该品种期权链", bg=BG, fg=BLUE,
-                 font=(self.font_name, 9)).pack(side="right")
-        cols = [("gex_rank", "GEX排名", 70), ("product", "品种", 70), ("expiry", "到期", 62),
-                ("days", "剩余天", 62), ("F", "标的价", 92), ("atm_iv", "ATM IV", 78),
-                ("hv20", "HV20", 78), ("hv60", "HV60", 78), ("iv_hv_pct", "IV/HV溢价", 88),
-                ("skew_25d", "25Δ偏度(vol)", 96), ("skew_pct", "偏度/ATM", 82),
-                ("net_gex", "净GEX(亿)", 92), ("gex_share_pct", "GEX占比", 78),
-                ("pcr_oi", "PCR(持仓)", 82), ("iv_percentile", "IV链内分位", 82), ("contracts", "合约数", 64)]
-        frame, self.tree_overview = self._new_tree(tab, cols, height=20)
-        frame.pack(fill="both", expand=True)
-        self.tree_overview.bind("<Double-1>", self._jump_from_overview)
 
-    def _build_chain_tab(self):
-        tab = tk.Frame(self.notebook, bg=BG)
-        self.notebook.add(tab, text="  期权链  ")
-        top = tk.Frame(tab, bg=BG, pady=8)
-        top.pack(fill="x")
-        self.chain_title = tk.Label(top, text="选择品种与到期后点击「查询期权链」", bg=BG, fg=FG,
-                                    font=(self.font_name, 10, "bold"))
-        self.chain_title.pack(side="left")
-        tk.Label(top, text="价格优先取买一/卖一中间价，其次最新价、昨收", bg=BG, fg=MUTED,
-                 font=(self.font_name, 8)).pack(side="right")
-        cols = [("instrument_id", "合约", 138), ("option_class", "类型", 54), ("strike", "行权价", 88),
-                ("price", "现价", 78), ("bid_price1", "买一", 78), ("ask_price1", "卖一", 78),
-                ("iv", "IV", 64), ("delta", "Δ", 64), ("gamma", "Γ", 90), ("open_interest", "持仓", 72),
-                ("gex", "GEX(万)", 86), ("gex_share_pct", "占比%", 70), ("days", "剩余天", 62)]
-        frame, self.tree_chain = self._new_tree(tab, cols, height=20)
-        frame.pack(fill="both", expand=True)
+        self.history_chart = ChartPanel(parent, figsize=(7.2, 3.6))
+        self.history_chart.frame.pack(fill="both", expand=True, padx=10, pady=8)
 
-    def _build_gex_tab(self):
-        tab = tk.Frame(self.notebook, bg=BG)
-        self.notebook.add(tab, text="  GEX 排名  ")
-        paned = tk.PanedWindow(tab, orient="horizontal", bg=BG, sashwidth=6, borderwidth=0)
-        paned.pack(fill="both", expand=True, pady=8)
+        body = tk.Frame(parent, bg=BG)
+        body.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+        cols = ["date", "F", "call_wall", "put_wall", "gamma_wall", "vol_trigger", "zero_gamma", "atm_iv", "pcr_oi"]
+        self.history_tree = self._mk_tree(body, cols, widths=[90, 80, 80, 80, 80, 80, 80, 65, 65],
+                                          titles=["日期", "F", "Call Wall", "Put Wall", "Gamma Wall",
+                                                  "Vol Trigger", "零伽马", "ATM IV", "PCR%"])
 
-        left = tk.Frame(paned, bg=CARD)
-        self.gex_head = tk.Label(left, text="净 GEX 分布与累计占比", bg=CARD, fg=FG,
-                                 font=(self.font_name, 10, "bold"), anchor="w")
-        self.gex_head.pack(fill="x", padx=12, pady=(10, 0))
-        self.gex_sub = tk.Label(left, text="—", bg=CARD, fg=MUTED,
-                                font=(self.font_name, 9), anchor="w", justify="left")
-        self.gex_sub.pack(fill="x", padx=12)
-        self.gex_chart = ChartPanel(left)
-        self.gex_chart.frame.pack(fill="both", expand=True, padx=6, pady=6)
-        paned.add(left, stretch="always")
+    # ---- 跨市场 ----
+    def _build_cross(self, parent):
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", padx=10, pady=8)
+        self._mk_btn(top, "扫描四大交易所", self._on_cross_compare, ACCENT, "#111").pack(side="left")
+        tk.Label(top, text="过滤品种", bg=BG, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=(14, 4))
+        self.cross_filter = tk.Entry(top, bg=CARD, fg=FG, insertbackground=FG, relief="flat",
+                                     font=(self.mono_font, 10), width=14)
+        self.cross_filter.pack(side="left", ipady=4)
+        self.cross_filter.bind("<Return>", lambda e: self._on_cross_compare())
+        self._mk_btn(top, "导出 CSV", self._on_export_cross).pack(side="left", padx=6)
 
-        right = tk.Frame(paned, bg=BG)
-        cols = [("strike", "行权价", 92), ("call_gex", "Call GEX(万)", 100), ("put_gex", "Put GEX(万)", 100),
-                ("net_gex", "净GEX(万)", 96), ("share_pct", "|净|占比%", 82),
-                ("cum_share_pct", "累计占比%", 88), ("cum_net_gex", "累计净GEX(万)", 108),
-                ("oi", "持仓", 72)]
-        frame, self.tree_gex = self._new_tree(right, cols, height=20)
-        frame.pack(fill="both", expand=True)
-        paned.add(right, stretch="always")
+        body = tk.Frame(parent, bg=BG)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        cols = ["gex_rank_all", "exchange_name", "product", "expiry", "days", "F", "atm_iv",
+                "iv_hv_pct", "net_gex", "pcr_oi"]
+        self.cross_tree = self._mk_tree(body, cols, widths=[60, 65, 60, 55, 45, 80, 65, 80, 95, 65],
+                                        titles=["全市场排名", "交易所", "品种", "到期", "天数", "F", "ATM IV",
+                                                "IV-HV%", "净GEX", "PCR%"])
 
-    def _build_skew_tab(self):
-        tab = tk.Frame(self.notebook, bg=BG)
-        self.notebook.add(tab, text="  偏度 SKEW  ")
-        paned = tk.PanedWindow(tab, orient="horizontal", bg=BG, sashwidth=6, borderwidth=0)
-        paned.pack(fill="both", expand=True, pady=8)
+    # ---------------------------------------------------------------- helpers
+    def _mk_tree(self, parent, cols, widths, titles) -> ttk.Treeview:
+        wrap = tk.Frame(parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        wrap.pack(fill="both", expand=True)
+        vsb = ttk.Scrollbar(wrap, orient="vertical")
+        hsb = ttk.Scrollbar(wrap, orient="horizontal")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings",
+                            yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.configure(command=tree.yview)
+        hsb.configure(command=tree.xview)
+        for c, w, t in zip(cols, widths, titles):
+            tree.heading(c, text=t)
+            tree.column(c, width=w, anchor="center", stretch=False)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        return tree
 
-        left = tk.Frame(paned, bg=CARD)
-        tk.Label(left, text="隐含波动率微笑", bg=CARD, fg=FG, font=(self.font_name, 10, "bold"),
-                 anchor="w").pack(fill="x", padx=12, pady=(10, 0))
-        self.skew_chart = ChartPanel(left)
-        self.skew_chart.frame.pack(fill="both", expand=True, padx=6, pady=6)
-        paned.add(left, stretch="always")
-
-        right = tk.Frame(paned, bg=BG)
-        card = tk.Frame(right, bg=CARD, padx=16, pady=12)
-        card.pack(fill="x")
-        tk.Label(card, text="SKEW / 波动率 / GEX 摘要", bg=CARD, fg=FG,
-                 font=(self.font_name, 11, "bold")).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
-        self.mvars = {}
-        rows = [
-            ("product", "品种", "expiry", "到期"),
-            ("days", "剩余天数", "spot", "标的"),
-            ("F", "标的价", "contracts", "合约数"),
-            ("atm_iv", "ATM IV", "hv20", "HV20"),
-            ("hv60", "HV60", "iv_hv_pct", "IV/HV 溢价"),
-            ("iv_pct", "IV 链内分位", "iv_range", "IV 区间"),
-            ("p25", "25Δ Put IV", "c25", "25Δ Call IV"),
-            ("skew", "25Δ 偏度", "skew_pct", "偏度 / ATM"),
-            ("netgex", "净 GEX", "callputgex", "Call / Put GEX"),
-            ("zero", "零伽马位", "maxstrike", "|GEX| 最大行权价"),
-            ("callwall", "Call 墙", "putwall", "Put 墙"),
-            ("pcr", "PCR(持仓)", "updated", "计算时间"),
-        ]
-        for i, (k1, t1, k2, t2) in enumerate(rows, start=1):
-            v1 = tk.StringVar(value="—")
-            v2 = tk.StringVar(value="—")
-            self.mvars[k1] = v1
-            self.mvars[k2] = v2
-            tk.Label(card, text=t1, bg=CARD, fg=MUTED, font=(self.font_name, 9)).grid(
-                row=i, column=0, sticky="w", pady=2)
-            tk.Label(card, textvariable=v1, bg=CARD, fg=FG, font=(self.font_name, 10, "bold")).grid(
-                row=i, column=1, sticky="w", padx=(8, 20), pady=2)
-            tk.Label(card, text=t2, bg=CARD, fg=MUTED, font=(self.font_name, 9)).grid(
-                row=i, column=2, sticky="w", pady=2)
-            tk.Label(card, textvariable=v2, bg=CARD, fg=FG, font=(self.font_name, 10, "bold")).grid(
-                row=i, column=3, sticky="w", padx=(8, 0), pady=2)
-        tk.Label(card, text="IV 由 Black-76 反解；HV 为标的日线 20/60 日年化；"
-                            "GEX = Γ×OI×乘数×F²×1%（Call 正 / Put 负）；"
-                            "25Δ 偏度 = Put25Δ IV − Call25Δ IV。",
-                 bg=CARD, fg=MUTED, font=(self.font_name, 8), wraplength=430, justify="left").grid(
-            row=len(rows) + 1, column=0, columnspan=4, sticky="w", pady=(12, 0))
-
-        term = tk.Frame(right, bg=BG, pady=8)
-        term.pack(fill="both", expand=True)
-        head = tk.Frame(term, bg=BG)
-        head.pack(fill="x")
-        tk.Label(head, text="偏度期限结构", bg=BG, fg=FG, font=(self.font_name, 10, "bold")).pack(side="left")
-        self.term_btn = tk.Button(head, text="计算全期限偏度", command=self._term_structure, bg=CARD, fg=FG,
-                                  relief="flat", font=(self.font_name, 9), padx=12, pady=4,
-                                  activebackground=BORDER, activeforeground=FG, cursor="hand2")
-        self.term_btn.pack(side="right")
-        cols = [("expiry", "到期", 62), ("days", "剩余天", 62), ("atm_iv", "ATM IV", 72),
-                ("hv20", "HV20", 72), ("iv_hv_pct", "IV/HV", 72), ("skew_25d", "25Δ偏度", 80),
-                ("skew_pct", "偏度/ATM", 80), ("net_gex", "净GEX(亿)", 88)]
-        frame, self.tree_skew = self._new_tree(term, cols, height=8)
-        frame.pack(fill="both", expand=True, pady=(6, 0))
-        paned.add(right, stretch="always")
+    def _show_page(self, name: str):
+        self._current_page = name
+        try:
+            idx = PAGES.index(name)
+            self.notebook.select(idx)
+        except Exception:
+            pass
+        for n, b in self._nav_buttons.items():
+            b.configure(bg=ACCENT if n == name else PANEL, fg="#111" if n == name else FG)
 
     # ---------------------------------------------------------------- engine
     def _start_engine(self):
+        if Engine is None:
+            self._set_status(f"导入失败：{IMPORT_ERROR}", RED)
+            return
         self.engine = Engine(self.cfg, self._notify)
         self.engine.start()
-        if self.cfg.get("username") and self.cfg.get("password"):
-            self.root.after(150, lambda: self._connect(self.cfg["username"], self.cfg["password"]))
+        if self.cfg.get("username") and os.environ.get("TQ_PASSWORD"):
+            self._submit(self.engine.connect, self.cfg["username"], os.environ["TQ_PASSWORD"],
+                         callback=self._after_connect)
         else:
-            self.root.after(300, self._open_settings)
-
-    def _notify(self, kind, text, frac=None):
-        self.ui_queue.put((kind, text, frac))
-
-    def _poll(self):
-        try:
-            while True:
-                kind, text, frac = self.ui_queue.get_nowait()
-                if kind == "status":
-                    self.status_var.set(text)
-                elif kind == "progress":
-                    if _valid(frac):
-                        self.progress.stop()
-                        self.progress.configure(mode="determinate", value=float(frac) * 100)
-                    self.status_var.set(text)
-                elif kind == "error":
-                    self.status_var.set(text)
-        except queue.Empty:
-            pass
-        self.root.after(120, self._poll)
-
-    def _connect(self, user, pwd):
-        self.cfg["username"], self.cfg["password"] = user, pwd
-        # 密码只放在当前进程内，便于自动重连；不写入文件
-        os.environ[ENV_USERNAME] = user
-        os.environ[ENV_PASSWORD] = pwd
-        save_config(self.cfg)
-        self._run(self.engine.connect, user, pwd, on_ok=self._on_connected,
-                  on_error=self._on_login_error, label="正在登录天勤…")
-
-    def _on_connected(self, _):
-        self.connected = True
-        self.state_label.configure(text="● 已登录", fg=DOWN)
-        self.status_var.set("登录成功，正在加载合约列表…")
-        self._load_products(self.exchange)
-
-    def _on_login_error(self, exc):
-        self.connected = False
-        self.state_label.configure(text="● 未登录", fg=UP)
-        msg = str(exc)
-        self.status_var.set("登录失败：" + msg)
-        messagebox.showerror("登录失败",
-                             f"{msg}\n\n请点击右上角「账户」检查快期账号与密码；\n"
-                             "若密码已更换，保存后会自动重新登录。", parent=self.root)
-        self.root.after(200, self._open_settings)
+            self.root.after(200, self._open_settings)
 
     def _open_settings(self):
-        if self.pending:
-            return
-        SettingsDialog(self.root, self.cfg, lambda u, p: self._connect(u, p), font_name=self.font_name)
+        SettingsDialog(self.root, self.font_name, self.cfg, self._on_login)
 
-    def _run(self, fn, *args, on_ok=None, on_error=None, label="处理中…"):
-        if not self.engine:
-            return
-        self.pending += 1
-        self._set_busy(True)
-        if label:
-            self.status_var.set(label)
-        self.progress.configure(mode="indeterminate")
-        self.progress.start(12)
-        fut = self.engine.submit(fn, *args)
+    def _on_login(self, user, pwd):
+        self.cfg["username"] = user
+        save_config(self.cfg)
+        if self.engine is None:
+            self.engine = Engine(self.cfg, self._notify)
+            self.engine.start()
+        self._submit(self.engine.connect, user, pwd, callback=self._after_connect)
 
-        def check():
-            if not fut.done():
-                self.root.after(140, check)
-                return
-            try:
-                try:
-                    result = fut.result()
-                except Exception as exc:  # noqa: BLE001
-                    (on_error or self._on_error)(exc)
-                else:
-                    if on_ok:
-                        try:
-                            on_ok(result)
-                        except Exception as exc:  # noqa: BLE001
-                            self._on_error(exc)
-            finally:
-                self.pending = max(0, self.pending - 1)
-                if self.pending == 0:
-                    self.progress.stop()
-                    self.progress.configure(mode="determinate", value=0)
-                    self._set_busy(False)
+    def _after_connect(self, _fut):
+        self._set_status(f"已登录：{Engine._mask(self.cfg.get('username', ''))}", CYAN)
+        self.connected = True
+        self._switch_exchange(self.exchange)
 
-        self.root.after(140, check)
+    def _switch_exchange(self, ex: str):
+        for e, b in self.ex_buttons.items():
+            b.configure(bg=ACCENT if e == ex else PANEL, fg="#111" if e == ex else FG)
+        self.exchange = ex
+        self._submit(self.engine.load_products, ex, False, callback=self._after_products)
 
-    def _set_busy(self, busy):
-        for widget in self._action_widgets:
-            try:
-                widget.configure(state="disabled" if busy else ("readonly" if isinstance(widget, ttk.Combobox) else "normal"))
-            except Exception:
-                pass
-
-    def _on_error(self, exc):
-        msg = str(exc) or exc.__class__.__name__
-        self.status_var.set("失败：" + msg)
-        messagebox.showerror("操作失败", msg, parent=self.root)
-        if ("登录" in msg or "认证" in msg or "credentials" in msg) and not self.connected:
-            self.root.after(100, self._open_settings)
-
-    # ---------------------------------------------------------------- actions
-    def _switch_exchange(self, code):
-        if self.pending:
-            return
-        self.exchange = code
-        self._switch_exchange_visual(code)
-        self._load_products(code)
-
-    def _switch_exchange_visual(self, code):
-        for c, btn in self.ex_buttons.items():
-            btn.configure(bg=ACCENT if c == code else CARD, fg="#111111" if c == code else MUTED)
-
-    def _load_products(self, exchange):
-        self.products = []
-        self.product_box.configure(values=[])
-        self.expiry_box.configure(values=[])
-        self._run(self.engine.load_products, exchange, True, on_ok=self._on_products,
-                  label=f"加载 {EXCHANGES.get(exchange, exchange)} 合约…")
-
-    def _on_products(self, res):
-        self.products = res.get("products", [])
-        values = [p["product"] for p in self.products]
-        self.product_box.configure(values=values)
-        if values:
-            self.product_box.current(0)
+    def _after_products(self, fut):
+        res = fut.result()
+        self.products = res["products"]
+        self.product_combo["values"] = [p["product"] for p in self.products]
+        if self.products:
+            self.product_combo.set(self.products[0]["product"])
             self._on_product_change()
-        self.status_var.set(f"{EXCHANGES.get(self.exchange, self.exchange)}：{len(values)} 个期权品种已就绪")
+        self._set_status(f"{EXCHANGES.get(self.exchange)}：{len(self.products)} 个品种", CYAN)
 
     def _on_product_change(self):
-        idx = self.product_box.current()
-        if idx < 0 or idx >= len(self.products):
+        prod = self.product_combo.get()
+        p = next((x for x in self.products if x["product"] == prod), None)
+        if p is None:
             return
-        prod = self.products[idx]
-        self.expiry_box.configure(values=[
-            f"{e['key']} · 剩余{int(e['days']) if _valid(e['days']) else '?'}天 · {e['count']}张"
-            for e in prod["expiries"]])
-        if prod["expiries"]:
-            self.expiry_box.current(0)
-        self.chain_title.configure(text=f"{prod['product']} 期权链 · 选择到期后查询")
+        self.expiry_combo["values"] = [f"{e['key']} ({e['days']}d)" for e in p["expiries"]]
+        if p["expiries"]:
+            self.expiry_combo.current(0)
+
+    def _on_expiry_change(self):
+        pass
 
     def _selected(self):
-        idx = self.product_box.current()
-        eidx = self.expiry_box.current()
-        if idx < 0 or idx >= len(self.products):
-            raise RuntimeError("请先选择品种。")
-        prod = self.products[idx]
-        if eidx < 0 or eidx >= len(prod["expiries"]):
-            raise RuntimeError("请先选择到期。")
-        return prod["product"], prod["expiries"][eidx]["key"]
+        prod = self.product_combo.get()
+        exp_text = self.expiry_combo.get()
+        key = exp_text.split(" ")[0] if exp_text else ""
+        return prod, key
 
-    def _query_chain(self):
-        try:
-            product, expiry = self._selected()
-        except Exception as exc:
-            messagebox.showinfo("提示", str(exc), parent=self.root)
+    def _on_refresh(self):
+        if self._current_page == "跨市场":
+            self._on_cross_compare()
+        else:
+            self._on_query_chain()
+
+    def _on_refresh_interval_change(self):
+        val = self.refresh_combo.get()
+        sec = 0 if val == "关" else int(val.rstrip("s"))
+        self.cfg["refresh_sec"] = sec
+        save_config(self.cfg)
+        if self._refresh_job is not None:
+            self.root.after_cancel(self._refresh_job)
+            self._refresh_job = None
+        if sec > 0:
+            self._schedule_refresh(sec)
+
+    def _schedule_refresh(self, sec):
+        self._refresh_job = self.root.after(sec * 1000, self._auto_refresh)
+
+    def _auto_refresh(self):
+        if self.connected and self._current_page in ("概览", "期权链", "GEX分析", "偏度", "波动率锥", "历史"):
+            self._on_query_chain(silent=True)
+        sec = self.cfg.get("refresh_sec", 0)
+        if sec > 0:
+            self._schedule_refresh(sec)
+
+    def _on_query_chain(self, silent=False):
+        prod, key = self._selected()
+        if not prod or not key:
+            if not silent:
+                messagebox.showinfo("提示", "请先选择品种与到期日。")
             return
-        self._run(self.engine.query_chain, self.exchange, product, expiry, 15,
-                  on_ok=self._on_chain, label=f"查询 {product} {expiry} 期权链…")
+        self._submit(self.engine.query_chain, self.exchange, prod, key,
+                     callback=lambda f: self._after_chain(f, silent))
 
-    def _on_chain(self, res):
-        self.chain_result = res
-        chain = res["chain"]
-        gex = res["gex"]
-        m = res["metrics"]
-        self.df_chain = chain.copy()
+    def _after_chain(self, fut, silent=False):
+        try:
+            self.chain_result = fut.result()
+        except Exception as exc:  # noqa: BLE001
+            if not silent:
+                messagebox.showerror("查询失败", str(exc))
+            return
+        self._last_refresh = self._now()
+        self.time_lbl.configure(text=f"更新 {self._last_refresh}")
+        self._fill_chain()
+        self._fill_gex()
+        self._fill_skew()
+        self._fill_cone()
+        self._fill_history()
+        self._check_alerts()
 
-        self.chain_title.configure(
-            text=f"{res['product']} {res['expiry']} · 标的 {res['spot_symbol']} {fnum(res['F'])} · "
-                 f"剩余 {res['days']} 天 · {len(chain)} 个合约")
-        self._fill_chain(chain)
-        self._fill_gex(gex, m)
-        self._fill_skew(res)
-        self._fill_metrics(res)
-        self._draw_gex_chart(gex)
-        self._draw_smile(chain, res["F"])
-        self.notebook.select(1)
-        self.status_var.set(f"{res['product']} {res['expiry']} 计算完成")
+    def _on_scan(self):
+        self._submit(self.engine.scan_exchange, self.exchange, callback=self._after_scan)
 
-    def _clear_tree(self, tree):
-        for item in tree.get_children(""):
-            tree.delete(item)
+    def _after_scan(self, fut):
+        try:
+            self.df_overview = fut.result()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("扫描失败", str(exc))
+            return
+        self._fill_overview()
 
-    def _fill_chain(self, chain: pd.DataFrame):
-        tree = self.tree_chain
-        self._clear_tree(tree)
-        for r in chain.itertuples(index=False):
-            tag = ("neg",) if _valid(r.gex) and r.gex < 0 else ("pos",)
-            tree.insert("", "end", values=(
-                r.instrument_id, "看涨 C" if r.option_class == "CALL" else "看跌 P",
-                fnum(r.strike, 2), fnum(r.price, 2), fnum(r.bid_price1, 2), fnum(r.ask_price1, 2),
-                fvol(r.iv), fnum(r.delta, 3), fnum(r.gamma, 5), fint(r.open_interest),
-                fyiw(r.gex), fpct(r.gex_share_pct, 1, signed=False), fint(r.days),
-            ), tags=tag)
+    def _on_cross_compare(self):
+        kw = self.cross_filter.get().strip()
+        self._submit(self.engine.cross_exchange_compare, kw, callback=self._after_cross)
 
-    def _fill_gex(self, gex: pd.DataFrame, metrics: dict):
-        tree = self.tree_gex
-        self._clear_tree(tree)
-        ranked = gex.reindex(gex["net_gex"].abs().sort_values(ascending=False).index) if not gex.empty else gex
-        for r in ranked.itertuples(index=False):
-            tag = ("pos",) if r.net_gex >= 0 else ("neg",)
-            tree.insert("", "end", values=(
-                fnum(r.strike, 2), fyiw(r.call_gex), fyiw(r.put_gex), fyiw(r.net_gex),
-                fpct(r.share_pct, 1, signed=False), fpct(r.cum_share_pct, 1, signed=False),
-                fyiw(r.cum_net_gex), fint(r.oi),
-            ), tags=tag)
-        if not gex.empty:
-            eighty = gex[gex["cum_share_pct"] >= 80]
-            k80 = fnum(eighty["strike"].iloc[0], 2) if not eighty.empty else "—"
-            self.gex_sub.configure(
-                text=f"净 GEX {fyi(metrics['net_gex'])} / 1%   |   "
-                     f"零伽马 {fnum(metrics['zero_gamma'], 2)}   |   "
-                     f"|GEX| 最大 {fnum(metrics['max_gex_strike'], 2)}   |   "
-                     f"累计占比 80% 处 {k80}")
-        self.df_gex = gex.copy()
+    def _after_cross(self, fut):
+        try:
+            self.df_cross = fut.result()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("跨市场对比失败", str(exc))
+            return
+        self._fill_cross()
 
-    def _fill_skew(self, res: dict):
-        m = res["metrics"]
-        self.df_skew = pd.DataFrame([{
-            "expiry": res["expiry"], "days": res["days"], "F": res["F"],
-            "atm_iv": m["atm_iv"], "hv20": m["hv20"], "iv_hv_pct": m["iv_hv_pct"],
-            "skew_25d": m["skew_25d"], "skew_pct": m["skew_pct"], "net_gex": m["net_gex"],
-        }])
-        self._fill_skew_table(self.df_skew)
+    def _on_term_structure(self):
+        prod, _ = self._selected()
+        if not prod:
+            return
+        self._submit(self.engine.term_structure, self.exchange, prod, callback=self._after_term)
 
-    def _fill_skew_table(self, df: pd.DataFrame):
-        tree = self.tree_skew
-        self._clear_tree(tree)
+    def _after_term(self, fut):
+        try:
+            self.df_skew = fut.result()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("期限结构失败", str(exc))
+            return
+        self._fill_skew_term()
+
+    # ---------------------------------------------------------------- fill
+    def _fill_overview(self):
+        t = self.overview_tree
+        for i in t.get_children():
+            t.delete(i)
+        if self.df_overview is None or self.df_overview.empty:
+            return
+        for r in self.df_overview.itertuples(index=False):
+            t.insert("", "end", values=(
+                fint(r.gex_rank), r.product, r.expiry, fint(r.days), fnum(r.F, 1),
+                fvol(r.atm_iv), fvol(r.hv20), fpct(r.iv_hv_pct), fpct(r.skew_pct),
+                fyi(r.net_gex), fnum(r.zero_gamma, 1), fpct(r.pcr_oi), fpct(r.iv_percentile, signed=False),
+            ))
+
+    def _fill_chain(self):
+        if not self.chain_result:
+            return
+        r = self.chain_result
+        df = r["chain"]
+        info = (f"{r['exchange']}.{r['product']} {r['expiry']} | F={fnum(r['F'])} | "
+                f"IV={fvol(r['metrics']['atm_iv'])} | HV20={fvol(r['metrics']['hv20'])} | 合约={r['metrics']['contracts']}")
+        self.chain_info.configure(text=info)
+        t = self.chain_tree
+        for i in t.get_children():
+            t.delete(i)
         if df is None or df.empty:
             return
-        for r in df.itertuples(index=False):
-            tag = ("neg",) if _valid(r.net_gex) and r.net_gex < 0 else ("pos",)
-            tree.insert("", "end", values=(
-                str(r.expiry), fint(r.days), fvol(r.atm_iv), fvol(r.hv20),
-                fpct(r.iv_hv_pct, 1), fnum(r.skew_25d, 2), fpct(r.skew_pct, 1),
-                fyi(r.net_gex),
-            ), tags=tag)
+        for row in df.itertuples(index=False):
+            cp = str(row.option_class).upper()
+            tag = "CALL" if cp.startswith("C") else "PUT"
+            t.insert("", "end", tags=(tag,), values=(
+                fnum(row.strike, 1), cp, fnum(row.price), fvol(row.iv), fpct(row.delta, signed=False),
+                fnum(row.gamma, 5), fnum(row.vanna, 5), fnum(row.vega, 4),
+                fint(row.open_interest), fyi(row.gex), fpct(row.gex_share_pct, signed=False),
+            ))
 
-    def _fill_metrics(self, res: dict):
-        m = res["metrics"]
-        mv = self.mvars
-        mv["product"].set(res["product"])
-        mv["expiry"].set(str(res["expiry"]))
-        mv["days"].set(f"{res['days']} 天")
-        mv["spot"].set(res["spot_symbol"] or "—")
-        mv["F"].set(fnum(res["F"], 2))
-        mv["contracts"].set(str(m["contracts"]))
-        mv["atm_iv"].set(fvol(m["atm_iv"]))
-        mv["hv20"].set(fvol(m["hv20"]))
-        mv["hv60"].set(fvol(m["hv60"]))
-        mv["iv_hv_pct"].set(fpct(m["iv_hv_pct"], 1))
-        mv["iv_pct"].set(fpct(m["iv_percentile"], 1, signed=False))
-        mv["iv_range"].set(f"{fvol(m['iv_min'])} ~ {fvol(m['iv_max'])}")
-        mv["p25"].set(fvol(m["iv_25d_put"]))
-        mv["c25"].set(fvol(m["iv_25d_call"]))
-        mv["skew"].set(f"{fnum(m['skew_25d'], 2)} vol")
-        mv["skew_pct"].set(fpct(m["skew_pct"], 1))
-        mv["netgex"].set(fyi(m["net_gex"]))
-        mv["callputgex"].set(f"{fyi(m['call_gex'])} / {fyi(m['put_gex'])}")
-        mv["zero"].set(fnum(m["zero_gamma"], 2))
-        mv["maxstrike"].set(fnum(m["max_gex_strike"], 2))
-        mv["callwall"].set(fnum(m["call_wall"], 2))
-        mv["putwall"].set(fnum(m["put_wall"], 2))
-        mv["pcr"].set(fpct(m["pcr_oi"], 1, signed=False))
-        mv["updated"].set(pd.Timestamp.now().strftime("%H:%M:%S"))
+    def _fill_gex(self):
+        if not self.chain_result:
+            return
+        r = self.chain_result
+        gex = r["gex"]
+        m = r["metrics"]
+        F = r["F"]
+        self.gex_info.configure(
+            text=f"F={fnum(F)} | 净GEX={fyi(m['net_gex'])} | Call={fyi(m['call_gex'])} | Put={fyi(m['put_gex'])}")
 
-    def _draw_gex_chart(self, gex: pd.DataFrame):
-        if not HAS_MPL:
-            self.gex_chart.placeholder("matplotlib 未安装")
-            return
-        if gex.empty:
-            self.gex_chart.placeholder("无 GEX 数据")
-            return
+        # KPI
+        self._set_kpi("net_gex", fyi(m["net_gex"]), f"零伽马 {fnum(m['zero_gamma'], 1)}")
+        self._set_kpi("zero_gamma", fnum(m["zero_gamma"], 1), fpct(m["key_levels"]["zero_gamma"]["dist_pct"]))
+        self._set_kpi("call_wall", fnum(m["call_wall"], 1), fpct(m["key_levels"]["call_wall"]["dist_pct"]))
+        self._set_kpi("put_wall", fnum(m["put_wall"], 1), fpct(m["key_levels"]["put_wall"]["dist_pct"]))
+
+        # 关键价位卡
+        for key in ["call_wall", "put_wall", "gamma_wall", "vol_trigger"]:
+            lv = m["key_levels"][key]
+            self.level_cards[key]["val"].configure(text=fnum(lv["strike"], 1))
+            self.level_cards[key]["sub"].configure(
+                text=f"{lv['hint']} | 距现价 {fpct(lv['dist_pct'])}")
+            # 异动高亮：距现价绝对值 < 0.5% 时边框加粗变色
+            near = _valid(lv["dist_pct"]) and abs(lv["dist_pct"]) < 0.5
+            self.level_cards[key]["card"].configure(
+                highlightbackground=YELLOW if near else self.level_cards[key]["color"])
+
+        # 图表
         ax = self.gex_chart.axes()
-        x = gex["strike"].values
-        net = gex["net_gex"].values / 1e4
-        colors = [UP if v >= 0 else DOWN for v in net]
-        ax.bar(x, net, width=(x[1] - x[0]) * 0.75 if len(x) > 1 else 1, color=colors, alpha=0.85)
-        ax.axhline(0, color=MUTED, linewidth=0.8)
-        ax.set_ylabel("净 GEX（万元 / 1%）", color=MUTED, fontsize=9)
-        ax.set_xlabel("行权价", color=MUTED, fontsize=9)
-        for label in ax.get_xticklabels():
-            label.set_rotation(45)
-            label.set_fontsize(7)
-        ax2 = ax.twinx()
-        ax2.plot(x, gex["cum_share_pct"].values, color=BLUE, linewidth=1.4, marker="o", markersize=3)
-        ax2.set_ylim(0, 105)
-        ax2.set_ylabel("累计占比 %", color=BLUE, fontsize=8)
-        ax2.tick_params(colors=BLUE, labelsize=7)
-        ax.set_title("GEX 排名分布", color=FG, fontsize=11, loc="left")
+        if ax is not None and gex is not None and not gex.empty:
+            strikes = gex["strike"].values
+            net = gex["net_gex"].values
+            colors = [GREEN if v >= 0 else RED for v in net]
+            bars = ax.bar(strikes, net / 1e8, color=colors, width=(strikes[-1] - strikes[0]) / max(len(strikes) * 1.6, 1),
+                          alpha=0.85, label="净GEX(亿)")
+            ax2 = ax.twinx()
+            cum = gex["cum_net_gex"].values
+            ax2.plot(strikes, cum / 1e8, color=CYAN, linewidth=1.6, label="累计净GEX(亿)")
+            ax2.axhline(0, color=BORDER, linewidth=0.8)
+            # 关键价位竖线
+            markers = [
+                (m["call_wall"], GREEN, "Call Wall"),
+                (m["put_wall"], RED, "Put Wall"),
+                (m["gamma_wall"], YELLOW, "Gamma Wall"),
+                (m["vol_trigger"], PURPLE, "Vol Trigger"),
+                (m["zero_gamma"], CYAN, "Zero Gamma"),
+            ]
+            for strike, color, label in markers:
+                if _valid(strike):
+                    ax.axvline(strike, color=color, linestyle="--", linewidth=1, alpha=0.85)
+                    y = net.max() / 1e8 * 0.9
+                    ax.text(strike, y, f"{label}\n{fnum(strike, 1)}", color=color,
+                            fontsize=7, ha="center", va="top")
+            ax.axvline(F, color=FG, linestyle=":", linewidth=1.2, alpha=0.6)
+            ax.text(F, net.min() / 1e8 * 0.9, f"F={fnum(F, 1)}", color=FG, fontsize=7, ha="center")
+            ax.set_xlabel("行权价", color=MUTED, fontsize=8)
+            ax.set_ylabel("净GEX (亿)", color=MUTED, fontsize=8)
+            ax2.set_ylabel("累计净GEX (亿)", color=CYAN, fontsize=8)
+            ax2.tick_params(axis="y", colors=CYAN, labelsize=8)
+            ax.set_title("GEX 分布与累计净GEX（含四大关键价位）", color=FG, fontsize=10)
         self.gex_chart.draw()
 
-    def _draw_smile(self, chain: pd.DataFrame, F: float):
-        if not HAS_MPL:
-            self.skew_chart.placeholder("matplotlib 未安装")
+        # 明细表
+        t = self.gex_tree
+        for i in t.get_children():
+            t.delete(i)
+        if gex is None or gex.empty:
             return
-        valid = chain[chain["iv"].notna() & np.isfinite(chain["iv"])]
-        if valid.empty:
-            self.skew_chart.placeholder("无有效 IV")
+        for row in gex.itertuples(index=False):
+            t.insert("", "end", values=(
+                fnum(row.strike, 1), fyi(row.call_gex), fyi(row.put_gex), fyi(row.net_gex),
+                fint(row.oi), fpct(row.share_pct, signed=False), fpct(row.cum_share_pct, signed=False),
+                fyi(row.cum_net_gex),
+            ))
+
+        # PCR 日内曲线
+        pcr_df = r.get("pcr_series")
+        ax3 = self.pcr_chart.axes()
+        if ax3 is not None and pcr_df is not None and len(pcr_df) > 1:
+            ax3.plot(pcr_df["time"], pcr_df["pcr"], color=ACCENT, linewidth=1.5, marker="o", markersize=3)
+            ax3.tick_params(axis="x", labelrotation=0, labelsize=7)
+            ax3.set_ylabel("PCR%", color=MUTED, fontsize=8)
+            ax3.set_title("PCR 日内变化", color=FG, fontsize=8, pad=2)
+        elif ax3 is not None:
+            ax3.text(0.5, 0.5, "开启自动刷新后显示 PCR 日内轨迹", color=MUTED, ha="center", va="center", fontsize=8)
+            ax3.axis("off")
+        self.pcr_chart.draw()
+
+    def _set_kpi(self, key, val, sub):
+        self.kpi_cards[key]["val"].configure(text=val)
+        self.kpi_cards[key]["sub"].configure(text=sub)
+
+    def _fill_skew(self):
+        if not self.chain_result:
             return
+        r = self.chain_result
+        m = r["metrics"]
+        summary = (f"标的F {fnum(r['F'])} | 到期 {r['expiry']} ({r['days']}天)\n"
+                   f"ATM IV {fvol(m['atm_iv'])} | 25Δ偏度 {fvol(m['skew_25d'])} (占ATM {fpct(m['skew_pct'])}) | "
+                   f"Call25Δ {fvol(m['iv_25d_call'])} | Put25Δ {fvol(m['iv_25d_put'])}")
+        self.skew_summary.configure(text=summary)
         ax = self.skew_chart.axes()
-        calls = valid[valid["option_class"] == "CALL"]
-        puts = valid[valid["option_class"] == "PUT"]
-        if not calls.empty:
-            ax.scatter(calls["strike"], calls["iv"] * 100, s=20, color=UP, alpha=0.8, label="Call IV", zorder=3)
-        if not puts.empty:
-            ax.scatter(puts["strike"], puts["iv"] * 100, s=20, color=DOWN, alpha=0.8, label="Put IV", zorder=3)
-        curve = valid.groupby("strike")["iv"].mean().sort_index()
-        ax.plot(curve.index.values, curve.values * 100, color=ACCENT, linewidth=1.6, label="微笑曲线", zorder=2)
-        ax.axvline(F, color=BLUE, linestyle="--", linewidth=1.0, label=f"标的 {F:.2f}")
-        ax.set_xlabel("行权价", color=MUTED, fontsize=9)
-        ax.set_ylabel("隐含波动率 %", color=MUTED, fontsize=9)
-        ax.set_title("IV Smile", color=FG, fontsize=11, loc="left")
-        legend = ax.legend(facecolor=CARD, edgecolor=BORDER, labelcolor=FG, fontsize=8, loc="upper right")
-        if legend:
-            legend.get_frame().set_alpha(0.9)
-        for label in ax.get_xticklabels():
-            label.set_rotation(30)
-            label.set_fontsize(7)
+        df = r["chain"]
+        if ax is not None and df is not None and not df.empty:
+            for cp, color, lbl in [("C", GREEN, "Call"), ("P", RED, "Put")]:
+                sub = df[df["option_class"].str.upper().str.startswith(cp)]
+                if sub.empty:
+                    continue
+                ax.plot(sub["strike"], sub["iv"] * 100, "o-", color=color, markersize=3,
+                        linewidth=1.2, label=lbl)
+            ax.axhline(m["atm_iv"] * 100, color=YELLOW, linestyle="--", linewidth=1, label=f"ATM {fvol(m['atm_iv'])}")
+            ax.set_xlabel("行权价", color=MUTED, fontsize=8)
+            ax.set_ylabel("IV (%)", color=MUTED, fontsize=8)
+            ax.legend(fontsize=8, facecolor=CARD, edgecolor=BORDER, labelcolor=FG)
+            ax.set_title("IV 微笑曲线", color=FG, fontsize=10)
         self.skew_chart.draw()
 
-    def _scan(self):
-        self._run(self.engine.scan_exchange, self.exchange, False, on_ok=self._on_scan,
-                  label=f"扫描 {EXCHANGES.get(self.exchange, self.exchange)} 全部期权品种…")
-
-    def _on_scan(self, df: pd.DataFrame):
-        self.df_overview = df
-        tree = self.tree_overview
-        self._clear_tree(tree)
-        for r in df.itertuples(index=False):
-            tag = ("pos",) if _valid(r.iv_hv_pct) and r.iv_hv_pct > 0 else ("neg",)
-            tree.insert("", "end", values=(
-                fint(r.gex_rank), str(r.product), str(r.expiry), fint(r.days), fnum(r.F, 2),
-                fvol(r.atm_iv), fvol(r.hv20), fvol(r.hv60), fpct(r.iv_hv_pct, 1),
-                f"{fnum(r.skew_25d, 2)}", fpct(r.skew_pct, 1), fyi(r.net_gex),
-                fpct(r.gex_share_pct, 1, signed=False), fpct(r.pcr_oi, 1, signed=False),
-                fpct(r.iv_percentile, 1, signed=False), fint(r.contracts),
-            ), tags=tag)
-        self.notebook.select(0)
-        self.status_var.set(f"已扫描 {len(df)} 个品种，按 |净GEX| 排名完成")
-
-    def _jump_from_overview(self, _event=None):
-        sel = self.tree_overview.selection()
-        if not sel:
+    def _fill_skew_term(self):
+        if self.df_skew is None or self.df_skew.empty:
             return
-        vals = self.tree_overview.item(sel[0], "values")
-        product, expiry = vals[1], vals[2]
-        idx = next((i for i, p in enumerate(self.products) if p["product"] == product), None)
-        if idx is None:
-            return
-        self.product_box.current(idx)
-        self._on_product_change()
-        eidx = next((i for i, e in enumerate(self.products[idx]["expiries"]) if e["key"] == expiry), None)
-        if eidx is not None:
-            self.expiry_box.current(eidx)
-            
-            self._query_chain()
+        t = self.skew_tree
+        for i in t.get_children():
+            t.delete(i)
+        for r in self.df_skew.itertuples(index=False):
+            t.insert("", "end", values=(
+                r.expiry, fint(r.days), fnum(r.F, 1), fvol(r.atm_iv), fvol(r.hv20),
+                fpct(r.iv_hv_pct), fvol(r.skew_25d), fpct(r.skew_pct), fyi(r.net_gex),
+            ))
 
-    def _term_structure(self):
-        try:
-            product, _ = self._selected()
-        except Exception as exc:
-            messagebox.showinfo("提示", str(exc), parent=self.root)
+    def _fill_cone(self):
+        if not self.chain_result:
             return
-        self._run(self.engine.term_structure, self.exchange, product, on_ok=self._on_term,
-                  label=f"计算 {product} 全期限偏度…")
+        r = self.chain_result
+        cone = r.get("cone", {})
+        df = cone.get("cone") if isinstance(cone, dict) else None
+        iv_rank = cone.get("iv_rank_in_hv") if isinstance(cone, dict) else float("nan")
+        self.cone_info.configure(
+            text=f"当前 IV {fvol(r['metrics']['atm_iv'])} 在历史 HV 中分位 {fpct(iv_rank, signed=False)}")
+        ax = self.cone_chart.axes()
+        if ax is not None and df is not None and not df.empty:
+            wins = df["window"].astype(str).values
+            for col, color, ls in [("p10", RED, ":"), ("p25", YELLOW, "--"), ("p50", FG, "-"),
+                                   ("p75", CYAN, "--"), ("p90", GREEN, ":")]:
+                ax.plot(wins, df[col] * 100, color=color, linestyle=ls, linewidth=1.3, label=col)
+            ax.plot(wins, df["current"] * 100, "o-", color=ACCENT, linewidth=2, markersize=5, label="当前HV")
+            ax.axhline(r["metrics"]["atm_iv"] * 100, color=PURPLE, linestyle="-.", linewidth=1.2, label="当前IV")
+            ax.set_xlabel("HV 窗口（交易日）", color=MUTED, fontsize=8)
+            ax.set_ylabel("波动率 (%)", color=MUTED, fontsize=8)
+            ax.legend(fontsize=7, facecolor=CARD, edgecolor=BORDER, labelcolor=FG)
+            ax.set_title("波动率锥：当前 IV 在历史 HV 分位中的位置", color=FG, fontsize=10)
+        self.cone_chart.draw()
 
-    def _on_term(self, df: pd.DataFrame):
-        self._fill_skew_table(df)
-        self.status_var.set(f"{self._selected()[0]} 全期限偏度计算完成（{len(df)} 个到期）")
-
-    def _export(self):
-        tab = self.notebook.index(self.notebook.select())
-        data = {0: self.df_overview, 1: self.df_chain, 2: self.df_gex, 3: self.df_skew}.get(tab)
-        if data is None or data.empty:
-            messagebox.showinfo("提示", "当前页没有可导出的数据。", parent=self.root)
+        t = self.cone_tree
+        for i in t.get_children():
+            t.delete(i)
+        if df is None or df.empty:
             return
-        default = f"{self.exchange}_{self._safe_name()}.csv"
-        path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".csv",
-                                            initialfile=default, filetypes=[("CSV", "*.csv")])
+        for row in df.itertuples(index=False):
+            t.insert("", "end", values=(
+                f"{row.window}日", fvol(row.mean), fvol(row.p10), fvol(row.p25), fvol(row.p50),
+                fvol(row.p75), fvol(row.p90), fvol(row.current),
+            ))
+
+    def _fill_history(self):
+        if not self.chain_result:
+            return
+        r = self.chain_result
+        df = self.engine.load_history(r["exchange"], r["product"], r["expiry"])
+        self.df_history = df
+        ax = self.history_chart.axes()
+        if ax is not None and df is not None and not df.empty:
+            dates = df["date"].values
+            for col, color, lbl in [("call_wall", GREEN, "Call Wall"),
+                                    ("put_wall", RED, "Put Wall"),
+                                    ("zero_gamma", CYAN, "Zero Gamma"),
+                                    ("F", FG, "标的F")]:
+                ax.plot(dates, df[col], "o-", color=color, markersize=3, linewidth=1.2, label=lbl)
+            ax.set_xlabel("日期", color=MUTED, fontsize=8)
+            ax.set_ylabel("价位", color=MUTED, fontsize=8)
+            ax.tick_params(axis="x", labelrotation=45, labelsize=7)
+            ax.legend(fontsize=8, facecolor=CARD, edgecolor=BORDER, labelcolor=FG)
+            ax.set_title("关键价位历史轨迹", color=FG, fontsize=10)
+        self.history_chart.draw()
+
+        t = self.history_tree
+        for i in t.get_children():
+            t.delete(i)
+        if df is None or df.empty:
+            return
+        for row in df.itertuples(index=False):
+            t.insert("", "end", values=(
+                row.date, fnum(row.F, 1), fnum(row.call_wall, 1), fnum(row.put_wall, 1),
+                fnum(row.gamma_wall, 1), fnum(row.vol_trigger, 1), fnum(row.zero_gamma, 1),
+                fvol(row.atm_iv), fpct(row.pcr_oi, signed=False),
+            ))
+
+    def _fill_cross(self):
+        if self.df_cross is None or self.df_cross.empty:
+            return
+        t = self.cross_tree
+        for i in t.get_children():
+            t.delete(i)
+        for r in self.df_cross.itertuples(index=False):
+            t.insert("", "end", values=(
+                fint(r.gex_rank_all), r.exchange_name, r.product, r.expiry, fint(r.days),
+                fnum(r.F, 1), fvol(r.atm_iv), fpct(r.iv_hv_pct), fyi(r.net_gex), fpct(r.pcr_oi),
+            ))
+
+    # ---------------------------------------------------------------- alerts / favorites / export
+    def _check_alerts(self):
+        if not self.chain_result:
+            self.alert_lbl.configure(text="")
+            return
+        m = self.chain_result["metrics"]
+        alerts = []
+        for key, name in [("call_wall", "Call Wall"), ("put_wall", "Put Wall")]:
+            d = m["key_levels"][key]["dist_pct"]
+            if _valid(d) and abs(d) < 0.5:
+                alerts.append(f"现价距{name}仅 {fpct(d)}")
+        self.alert_lbl.configure(text="⚠ " + "  ".join(alerts) if alerts else "")
+
+    def _refresh_favorites(self):
+        for w in self.fav_frame.winfo_children():
+            w.destroy()
+        favs = self.cfg.get("favorites", [])
+        if not favs:
+            tk.Label(self.fav_frame, text="（空）点上方★添加", bg=PANEL, fg=MUTED,
+                     font=(self.font_name, 8)).pack(anchor="w", padx=8)
+            return
+        for f in favs:
+            row = tk.Frame(self.fav_frame, bg=PANEL)
+            row.pack(fill="x", padx=4, pady=1)
+            tk.Button(row, text=f, bg=PANEL, fg=CYAN, relief="flat", anchor="w",
+                      font=(self.mono_font, 9), cursor="hand2",
+                      command=lambda ff=f: self._goto_favorite(ff)).pack(side="left", fill="x", expand=True)
+            tk.Button(row, text="×", bg=PANEL, fg=RED, relief="flat", font=(self.font_name, 9),
+                      cursor="hand2", command=lambda ff=f: self._remove_favorite(ff)).pack(side="right")
+
+    def _add_favorite(self):
+        prod, key = self._selected()
+        if not prod:
+            return
+        tag = f"{self.exchange}.{prod}.{key}"
+        favs = self.cfg.setdefault("favorites", [])
+        if tag not in favs:
+            favs.append(tag)
+            save_config(self.cfg)
+            self._refresh_favorites()
+
+    def _remove_favorite(self, tag):
+        favs = self.cfg.get("favorites", [])
+        if tag in favs:
+            favs.remove(tag)
+            save_config(self.cfg)
+            self._refresh_favorites()
+
+    def _goto_favorite(self, tag):
+        parts = tag.split(".", 2)
+        if len(parts) != 3:
+            return
+        ex, prod, expiry = parts
+        self._switch_exchange(ex)
+        # 等品种加载完
+        def _pick():
+            self.product_combo.set(prod)
+            self._on_product_change()
+            # 选中对应到期
+            vals = list(self.expiry_combo["values"])
+            for i, v in enumerate(vals):
+                if v.startswith(expiry):
+                    self.expiry_combo.current(i)
+                    break
+            self._show_page("GEX分析")
+            self._on_query_chain()
+        self.root.after(800, _pick)
+
+    def _export_figure(self, chart: ChartPanel, prefix: str):
+        if not HAS_MPL or chart.figure is None:
+            messagebox.showinfo("提示", "暂无图表可导出。")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".png",
+                                            filetypes=[("PNG", "*.png")],
+                                            initialfile=f"{prefix}_{self._now().replace(':', '')}.png")
         if not path:
             return
+        chart.save_png(path)
+        messagebox.showinfo("导出成功", f"已保存到 {path}")
+
+    def _on_export_overview(self):
+        self._export_csv(self.df_overview, "overview")
+
+    def _on_export_chain(self):
+        self._export_csv(self.df_chain, "chain")
+
+    def _on_export_cross(self):
+        self._export_csv(self.df_cross, "cross")
+
+    def _export_csv(self, df, prefix):
+        if df is None or df.empty:
+            messagebox.showinfo("提示", "暂无数据可导出。")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                            filetypes=[("CSV", "*.csv")],
+                                            initialfile=f"{prefix}_{self._now().replace(':', '')}.csv")
+        if not path:
+            return
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        messagebox.showinfo("导出成功", f"已保存到 {path}")
+
+    # ---------------------------------------------------------------- tree events
+    def _on_overview_double(self, _event):
+        sel = self.overview_tree.selection()
+        if not sel:
+            return
+        vals = self.overview_tree.item(sel[0])["values"]
+        prod, expiry = vals[1], vals[2]
+        self.product_combo.set(prod)
+        self._on_product_change()
+        vals_e = list(self.expiry_combo["values"])
+        for i, v in enumerate(vals_e):
+            if v.startswith(str(expiry)):
+                self.expiry_combo.current(i)
+                break
+        self._show_page("期权链")
+        self._on_query_chain()
+
+    def _on_gex_double(self, _event):
+        sel = self.gex_tree.selection()
+        if not sel:
+            return
+        vals = self.gex_tree.item(sel[0])["values"]
+        # 滚动图表到该行权价（简化：切到期权链页）
+        self._show_page("期权链")
+
+    # ---------------------------------------------------------------- run loop
+    def _submit(self, fn, *args, callback=None) -> bool:
+        if self.engine is None:
+            return False
+        self._set_busy(True)
+        fut = self.engine.submit(fn, *args)
+        if callback:
+            self.root.after(80, lambda: self._poll_future(fut, callback))
+        else:
+            self.root.after(80, lambda: self._poll_future(fut, None))
+        return True
+
+    def _poll_future(self, fut, callback):
+        if not fut.done():
+            self.root.after(100, lambda: self._poll_future(fut, callback))
+            return
         try:
-            data.to_csv(path, index=False, encoding="utf-8-sig")
-            self.status_var.set(f"已导出 {os.path.basename(path)}")
+            if callback:
+                callback(fut)
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("导出失败", str(exc), parent=self.root)
+            messagebox.showerror("错误", str(exc))
+        finally:
+            self._set_busy(False)
 
-    def _safe_name(self) -> str:
-        try:
-            product, expiry = self._selected()
-            return f"{product}_{expiry}"
-        except Exception:
-            return "options"
+    def _notify(self, kind, msg, *args):
+        if kind == "status":
+            self._set_status(msg, CYAN)
 
-    def _sort_tree(self, tree, col):
-        state = self._sort_state.get(tree, (None, False))
-        reverse = not state[1] if state[0] == col else False
-        self._sort_state[tree] = (col, reverse)
-        items = [(tree.set(k, col), k) for k in tree.get_children("")]
-
-        def key(pair):
-            text = pair[0].replace(",", "").replace("%", "").replace("+", "").replace("亿", "e8").replace("万", "e4")
+    def _poll(self):
+        while True:
             try:
-                return (0, float(text))
-            except ValueError:
-                return (1, pair[0])
+                kind, payload = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.root.after(150, self._poll)
 
-        items.sort(key=key, reverse=reverse)
-        for index, (_, k) in enumerate(items):
-            tree.move(k, "", index)
+    def _set_busy(self, busy: bool):
+        if busy:
+            self.pending += 1
+        else:
+            self.pending = max(0, self.pending - 1)
+        state = "disabled" if self.pending > 0 else "normal"
+        for w in self._action_widgets:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+        if self.pending > 0:
+            self.root.configure(cursor="watch")
+        else:
+            self.root.configure(cursor="")
+
+    def _set_status(self, text: str, color: str):
+        self.status_lbl.configure(text=text, fg=color)
+
+    @staticmethod
+    def _now() -> str:
+        from datetime import datetime
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _on_close(self):
-        if self.engine:
+        if self._refresh_job is not None:
+            try:
+                self.root.after_cancel(self._refresh_job)
+            except Exception:
+                pass
+        if self.engine is not None:
             self.engine.stop()
-        try:
-            self.root.destroy()
-        except Exception:
-            pass
+        self.root.destroy()
 
 
 def main():
     root = tk.Tk()
-    if Engine is None:
-        root.withdraw()
-        if sys.stderr is not None:
-            print(f"依赖导入失败：{IMPORT_ERROR}", file=sys.stderr)
-        messagebox.showerror("无法启动",
-                             f"依赖导入失败：{IMPORT_ERROR}\n\n"
-                             "请先执行：pip install -r requirements.txt\n"
-                             "并确认 Python 版本为 3.9 ~ 3.12。")
-        root.destroy()
-        return
     App(root)
     root.mainloop()
 

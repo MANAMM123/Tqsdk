@@ -60,6 +60,19 @@ def black76_greeks(F: float, K: float, T: float, sigma: float, option_class: str
     return delta, gamma, vega
 
 
+def black76_vanna(F: float, K: float, T: float, sigma: float, option_class: str, r: float = 0.0) -> float:
+    """Vanna = dDelta/dVol，表征 Delta 对波动率的敏感度（无量纲，百分比变动）。"""
+    if not _ok(F, K, T, sigma) or F <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        return NAN
+    df = math.exp(-r * T)
+    sqrt_t = math.sqrt(T)
+    d1 = (math.log(F / K) + 0.5 * sigma * sigma * T) / (sigma * sqrt_t)
+    d2 = d1 - sigma * sqrt_t
+    # dN'(d1)/dd1 = -d1 * N'(d1)，vega 对 F 求导得到 vanna 的常用形式
+    vanna = -df * norm_pdf(d1) * d2 / sigma
+    return vanna
+
+
 def implied_vol(price: float, F: float, K: float, T: float, option_class: str,
                 r: float = 0.0, lo: float = 1e-4, hi: float = 5.0) -> float:
     """由期权价格反解隐含波动率；无解或价格低于内在价值时返回 nan。"""
@@ -95,19 +108,62 @@ def hv_from_closes(closes, window: int = 20, trading_days: int = 252) -> float:
     return float(np.std(rets, ddof=1) * math.sqrt(trading_days))
 
 
+def rolling_hv(closes, window: int, trading_days: int = 252) -> np.ndarray:
+    """返回滚动 window 日年化 HV 序列（长度 len-1-window+1）。"""
+    arr = np.asarray([float(c) for c in closes if _ok(c) and c > 0], dtype=float)
+    if len(arr) < window + 2:
+        return np.array([])
+    rets = np.diff(np.log(arr))
+    if len(rets) < window:
+        return np.array([])
+    out = []
+    for i in range(window, len(rets) + 1):
+        seg = rets[i - window:i]
+        out.append(float(np.std(seg, ddof=1) * math.sqrt(trading_days)))
+    return np.asarray(out)
+
+
+def vol_cone(closes, windows=(5, 10, 20, 30, 60, 120), current_iv: float = NAN) -> dict:
+    """波动率锥：各窗口 HV 的分位数分布，并定位当前 IV 在锥中的位置。"""
+    rows = []
+    for w in windows:
+        ser = rolling_hv(closes, w)
+        if len(ser) < 5:
+            continue
+        rows.append({
+            "window": w,
+            "mean": float(np.mean(ser)),
+            "p10": float(np.percentile(ser, 10)),
+            "p25": float(np.percentile(ser, 25)),
+            "p50": float(np.percentile(ser, 50)),
+            "p75": float(np.percentile(ser, 75)),
+            "p90": float(np.percentile(ser, 90)),
+            "current": float(ser[-1]) if len(ser) else NAN,
+        })
+    df = pd.DataFrame(rows)
+    iv_rank = NAN
+    if not df.empty and _ok(current_iv):
+        # 把 IV 与各窗口 HV 合并看分位
+        all_hv = np.concatenate([rolling_hv(closes, w) for w in windows])
+        if len(all_hv) > 0:
+            iv_rank = float((all_hv <= current_iv).mean() * 100.0)
+    return {"cone": df, "iv_rank_in_hv": iv_rank}
+
+
 def compute_chain(df: pd.DataFrame, F: float, T: float, r: float = 0.0) -> pd.DataFrame:
-    """为期权链补充 IV、Delta、Gamma、Vega、单合约 GEX。
+    """为期权链补充 IV、Delta、Gamma、Vega、Vanna、单合约 GEX。
 
     输入列：strike, option_class, price, open_interest, volume_multiple
     """
     out = df.copy()
-    ivs, deltas, gammas, vegas, gex = [], [], [], [], []
+    ivs, deltas, gammas, vegas, vannas, gex = [], [], [], [], [], []
     for row in out.itertuples(index=False):
         cp = str(row.option_class).upper()
         strike = float(row.strike)
         price = float(row.price)
         iv = implied_vol(price, F, strike, T, cp, r)
         delta, gamma, vega = black76_greeks(F, strike, T, iv, cp, r)
+        vanna = black76_vanna(F, strike, T, iv, cp, r)
         oi = float(row.open_interest) if _ok(row.open_interest) else 0.0
         mult = float(row.volume_multiple) if _ok(row.volume_multiple) and row.volume_multiple > 0 else 1.0
         sign = 1.0 if cp.startswith("C") else -1.0
@@ -116,11 +172,13 @@ def compute_chain(df: pd.DataFrame, F: float, T: float, r: float = 0.0) -> pd.Da
         deltas.append(delta)
         gammas.append(gamma)
         vegas.append(vega)
+        vannas.append(vanna)
         gex.append(contract_gex)
     out["iv"] = ivs
     out["delta"] = deltas
     out["gamma"] = gammas
     out["vega"] = vegas
+    out["vanna"] = vannas
     out["gex"] = gex
     return out
 
@@ -177,22 +235,31 @@ def skew_stats(df: pd.DataFrame, F: float) -> dict:
 
 
 def gex_table(df: pd.DataFrame) -> pd.DataFrame:
-    """按行权价汇总 GEX，并给出占比、累计占比与累计净 GEX。"""
+    """按行权价汇总 GEX 与 Vanna，并给出占比、累计占比与累计净 GEX。"""
     valid = df[df["gex"].notna() & np.isfinite(df["gex"])]
     if valid.empty:
         return pd.DataFrame(columns=["strike", "call_gex", "put_gex", "net_gex",
+                                     "call_vanna", "put_vanna", "net_vanna",
                                      "share_pct", "cum_share_pct", "cum_net_gex", "oi"])
+    has_vanna = "vanna" in valid.columns
     rows = []
     for strike, g in valid.groupby("strike"):
-        call_gex = float(g.loc[g["option_class"].str.upper().str.startswith("C"), "gex"].sum())
-        put_gex = float(g.loc[g["option_class"].str.upper().str.startswith("P"), "gex"].sum())
-        rows.append({
+        c_mask = g["option_class"].str.upper().str.startswith("C")
+        p_mask = g["option_class"].str.upper().str.startswith("P")
+        call_gex = float(g.loc[c_mask, "gex"].sum())
+        put_gex = float(g.loc[p_mask, "gex"].sum())
+        row = {
             "strike": float(strike),
             "call_gex": call_gex,
             "put_gex": put_gex,
             "net_gex": call_gex + put_gex,
             "oi": float(g["open_interest"].fillna(0).sum()),
-        })
+        }
+        if has_vanna:
+            row["call_vanna"] = float(g.loc[c_mask, "vanna"].fillna(0).sum())
+            row["put_vanna"] = float(g.loc[p_mask, "vanna"].fillna(0).sum())
+            row["net_vanna"] = row["call_vanna"] + row["put_vanna"]
+        rows.append(row)
     table = pd.DataFrame(rows).sort_values("strike").reset_index(drop=True)
     abs_net = table["net_gex"].abs()
     total_abs = abs_net.sum()
@@ -200,6 +267,24 @@ def gex_table(df: pd.DataFrame) -> pd.DataFrame:
     table["cum_share_pct"] = table["share_pct"].cumsum()
     table["cum_net_gex"] = table["net_gex"].cumsum()
     return table
+
+
+def vol_trigger_level(gex_df: pd.DataFrame) -> float:
+    """波动切换位：累计净 Vanna 由负转正的行权价（线性插值）。
+
+    意义：Vanna 由负转正处，价格对波动率的反馈机制切换，常对应波动由收敛转放大。
+    """
+    if gex_df.empty or "net_vanna" not in gex_df.columns:
+        return NAN
+    strikes = gex_df["strike"].values
+    cum = gex_df["net_vanna"].cumsum().values
+    for i in range(1, len(cum)):
+        if (cum[i - 1] < 0 <= cum[i]) or (cum[i - 1] > 0 >= cum[i]):
+            x0, x1, y0, y1 = strikes[i - 1], strikes[i], cum[i - 1], cum[i]
+            if y1 == y0:
+                return float(x1)
+            return float(x0 + (0 - y0) * (x1 - x0) / (y1 - y0))
+    return NAN
 
 
 def zero_gamma_level(gex_df: pd.DataFrame) -> float:
@@ -232,14 +317,45 @@ def summary_metrics(df: pd.DataFrame, F: float, hv20: float = NAN, hv60: float =
     max_gex_strike = NAN
     call_wall = NAN
     put_wall = NAN
+    gamma_wall = NAN
     if not gex_df.empty:
         max_gex_strike = float(gex_df.loc[gex_df["net_gex"].abs().idxmax(), "strike"])
         call_wall = float(gex_df.loc[gex_df["call_gex"].idxmax(), "strike"])
         put_wall = float(gex_df.loc[gex_df["put_gex"].idxmin(), "strike"])
+        gamma_wall = float(gex_df.loc[gex_df["net_gex"].abs().idxmax(), "strike"])
+    zero_gamma = zero_gamma_level(gex_df)
+    vol_trigger = vol_trigger_level(gex_df)
     iv_pct = NAN
     if not curve.empty and _ok(sk["atm_iv"]):
         iv_pct = float((curve <= sk["atm_iv"]).mean() * 100.0)
     iv_hv_pct = ((sk["atm_iv"] - hv20) / hv20 * 100.0) if _ok(sk["atm_iv"], hv20) and hv20 > 0 else NAN
+
+    def _dist(strike):
+        if not _ok(strike) or not _ok(F) or F <= 0:
+            return NAN
+        return (strike - F) / F * 100.0
+
+    def _val(strike):
+        if not _ok(strike) or gex_df.empty:
+            return NAN
+        # 该价位的净 GEX
+        row = gex_df.iloc[(gex_df["strike"] - strike).abs().argsort()[:1]]
+        if row.empty:
+            return NAN
+        return float(row["net_gex"].iloc[0])
+
+    key_levels = {
+        "call_wall": {"strike": call_wall, "value": _val(call_wall), "dist_pct": _dist(call_wall),
+                      "label": "看涨阻力位 Call Wall", "hint": "价格向上易遇天花板"},
+        "put_wall": {"strike": put_wall, "value": _val(put_wall), "dist_pct": _dist(put_wall),
+                     "label": "看跌支撑位 Put Wall", "hint": "价格向下易托住地板"},
+        "gamma_wall": {"strike": gamma_wall, "value": _val(gamma_wall), "dist_pct": _dist(gamma_wall),
+                       "label": "伽马关键位 Gamma Wall", "hint": "价格容易被钉住波动收敛"},
+        "vol_trigger": {"strike": vol_trigger, "value": NAN, "dist_pct": _dist(vol_trigger),
+                        "label": "波动变化位 Vol Trigger", "hint": "市场可能从收敛切换为放大"},
+        "zero_gamma": {"strike": zero_gamma, "value": NAN, "dist_pct": _dist(zero_gamma),
+                       "label": "零伽马位 Zero Gamma", "hint": "做市商对冲方向反转"},
+    }
     return {
         **sk,
         "hv20": hv20,
@@ -252,7 +368,10 @@ def summary_metrics(df: pd.DataFrame, F: float, hv20: float = NAN, hv60: float =
         "max_gex_strike": max_gex_strike,
         "call_wall": call_wall,
         "put_wall": put_wall,
-        "zero_gamma": zero_gamma_level(gex_df),
+        "gamma_wall": gamma_wall,
+        "vol_trigger": vol_trigger,
+        "zero_gamma": zero_gamma,
+        "key_levels": key_levels,
         "pcr_oi": (put_oi / call_oi * 100.0) if call_oi > 0 else NAN,
         "call_oi": call_oi,
         "put_oi": put_oi,
