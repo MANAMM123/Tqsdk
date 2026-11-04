@@ -240,27 +240,34 @@ def gex_table(df: pd.DataFrame) -> pd.DataFrame:
     if valid.empty:
         return pd.DataFrame(columns=["strike", "call_gex", "put_gex", "net_gex",
                                      "call_vanna", "put_vanna", "net_vanna",
-                                     "share_pct", "cum_share_pct", "cum_net_gex", "oi"])
+                                     "share_pct", "cum_share_pct", "cum_net_gex",
+                                     "oi", "call_oi", "put_oi"])
     has_vanna = "vanna" in valid.columns
-    rows = []
-    for strike, g in valid.groupby("strike"):
-        c_mask = g["option_class"].str.upper().str.startswith("C")
-        p_mask = g["option_class"].str.upper().str.startswith("P")
-        call_gex = float(g.loc[c_mask, "gex"].sum())
-        put_gex = float(g.loc[p_mask, "gex"].sum())
-        row = {
-            "strike": float(strike),
-            "call_gex": call_gex,
-            "put_gex": put_gex,
-            "net_gex": call_gex + put_gex,
-            "oi": float(g["open_interest"].fillna(0).sum()),
-        }
-        if has_vanna:
-            row["call_vanna"] = float(g.loc[c_mask, "vanna"].fillna(0).sum())
-            row["put_vanna"] = float(g.loc[p_mask, "vanna"].fillna(0).sum())
-            row["net_vanna"] = row["call_vanna"] + row["put_vanna"]
-        rows.append(row)
-    table = pd.DataFrame(rows).sort_values("strike").reset_index(drop=True)
+    upper = valid["option_class"].astype(str).str.upper()
+    call_mask = upper.str.startswith("C").values
+    put_mask = upper.str.startswith("P").values
+
+    # 向量化聚合：避免逐档 Python 循环（链档量大时明显更快）
+    call_df = valid[call_mask].groupby("strike").agg(
+        call_gex=("gex", "sum"), call_oi=("open_interest", "sum"),
+        **({"call_vanna": ("vanna", "sum")} if has_vanna else {}))
+    put_df = valid[put_mask].groupby("strike").agg(
+        put_gex=("gex", "sum"), put_oi=("open_interest", "sum"),
+        **({"put_vanna": ("vanna", "sum")} if has_vanna else {}))
+    table = pd.concat([call_df, put_df], axis=1).fillna(0.0).sort_index().reset_index()
+    table = table.rename(columns={"index": "strike"})
+    if "strike" not in table.columns:
+        table = table.rename(columns={table.columns[0]: "strike"})
+    for col in ("call_gex", "put_gex", "call_oi", "put_oi"):
+        if col not in table.columns:
+            table[col] = 0.0
+    table["net_gex"] = table["call_gex"] + table["put_gex"]
+    table["oi"] = table["call_oi"] + table["put_oi"]
+    if has_vanna:
+        for col in ("call_vanna", "put_vanna"):
+            if col not in table.columns:
+                table[col] = 0.0
+        table["net_vanna"] = table["call_vanna"] + table["put_vanna"]
     abs_net = table["net_gex"].abs()
     total_abs = abs_net.sum()
     table["share_pct"] = (abs_net / total_abs * 100.0).fillna(0) if total_abs > 0 else 0.0
@@ -287,26 +294,54 @@ def vol_trigger_level(gex_df: pd.DataFrame) -> float:
     return NAN
 
 
-def zero_gamma_level(gex_df: pd.DataFrame) -> float:
-    """累计净 GEX 由负转正的零伽马价位（线性插值）。"""
+def zero_gamma_level(gex_df: pd.DataFrame, F: float = NAN) -> float:
+    """累计净 GEX 的零伽马价位（线性插值）。传入现价时取离现价最近的一次穿越。"""
     if gex_df.empty:
         return NAN
     strikes = gex_df["strike"].values
     cum = gex_df["cum_net_gex"].values
+    crossings = []
     for i in range(1, len(cum)):
         if (cum[i - 1] < 0 <= cum[i]) or (cum[i - 1] > 0 >= cum[i]):
             x0, x1, y0, y1 = strikes[i - 1], strikes[i], cum[i - 1], cum[i]
             if y1 == y0:
-                return float(x1)
-            return float(x0 + (0 - y0) * (x1 - x0) / (y1 - y0))
-    return NAN
+                crossings.append(float(x1))
+            else:
+                crossings.append(float(x0 + (0 - y0) * (x1 - x0) / (y1 - y0)))
+    if not crossings:
+        return NAN
+    if _ok(F):
+        return min(crossings, key=lambda s: abs(s - F))
+    return crossings[0]
 
 
-def summary_metrics(df: pd.DataFrame, F: float, hv20: float = NAN, hv60: float = NAN) -> dict:
-    """单条期权链的汇总指标。"""
+def max_pain_level(gex_df: pd.DataFrame) -> float:
+    """Max Pain：使全部期权买方合计内在价值损失最小的到期结算价。
+
+    直觉：做市商/卖方仓位最舒服的价位，价格到期时容易被"吸"过去。
+    """
+    if gex_df.empty or "call_oi" not in gex_df.columns:
+        return NAN
+    strikes = gex_df["strike"].values.astype(float)
+    call_oi = gex_df["call_oi"].fillna(0).values.astype(float)
+    put_oi = gex_df["put_oi"].fillna(0).values.astype(float)
+    if len(strikes) == 0:
+        return NAN
+    best_k, best_loss = NAN, None
+    for k in strikes:
+        loss = float(np.sum(call_oi * np.maximum(k - strikes, 0.0)) +
+                     np.sum(put_oi * np.maximum(strikes - k, 0.0)))
+        if best_loss is None or loss < best_loss:
+            best_loss, best_k = loss, float(k)
+    return best_k
+
+
+def summary_metrics(df: pd.DataFrame, F: float, hv20: float = NAN, hv60: float = NAN,
+                    gex_df: pd.DataFrame | None = None) -> dict:
+    """单条期权链的汇总指标。gex_df 可传入已算好的表，避免重复计算。"""
     sk = skew_stats(df, F)
     curve = smile_by_strike(df)
-    gex_df = gex_table(df)
+    gex_df = gex_table(df) if gex_df is None else gex_df
     calls = df[df["option_class"].str.upper().str.startswith("C")]
     puts = df[df["option_class"].str.upper().str.startswith("P")]
     call_oi = float(calls["open_interest"].fillna(0).sum())
@@ -323,8 +358,9 @@ def summary_metrics(df: pd.DataFrame, F: float, hv20: float = NAN, hv60: float =
         call_wall = float(gex_df.loc[gex_df["call_gex"].idxmax(), "strike"])
         put_wall = float(gex_df.loc[gex_df["put_gex"].idxmin(), "strike"])
         gamma_wall = float(gex_df.loc[gex_df["net_gex"].abs().idxmax(), "strike"])
-    zero_gamma = zero_gamma_level(gex_df)
+    zero_gamma = zero_gamma_level(gex_df, F)
     vol_trigger = vol_trigger_level(gex_df)
+    max_pain = max_pain_level(gex_df)
     iv_pct = NAN
     if not curve.empty and _ok(sk["atm_iv"]):
         iv_pct = float((curve <= sk["atm_iv"]).mean() * 100.0)
@@ -354,7 +390,9 @@ def summary_metrics(df: pd.DataFrame, F: float, hv20: float = NAN, hv60: float =
         "vol_trigger": {"strike": vol_trigger, "value": NAN, "dist_pct": _dist(vol_trigger),
                         "label": "波动变化位 Vol Trigger", "hint": "市场可能从收敛切换为放大"},
         "zero_gamma": {"strike": zero_gamma, "value": NAN, "dist_pct": _dist(zero_gamma),
-                       "label": "零伽马位 Zero Gamma", "hint": "做市商对冲方向反转"},
+                       "label": "零伽马位 Gamma Flip", "hint": "做市商对冲方向反转"},
+        "max_pain": {"strike": max_pain, "value": NAN, "dist_pct": _dist(max_pain),
+                     "label": "最大痛点 Max Pain", "hint": "到期引力中心"},
     }
     return {
         **sk,
@@ -371,6 +409,7 @@ def summary_metrics(df: pd.DataFrame, F: float, hv20: float = NAN, hv60: float =
         "gamma_wall": gamma_wall,
         "vol_trigger": vol_trigger,
         "zero_gamma": zero_gamma,
+        "max_pain": max_pain,
         "key_levels": key_levels,
         "pcr_oi": (put_oi / call_oi * 100.0) if call_oi > 0 else NAN,
         "call_oi": call_oi,

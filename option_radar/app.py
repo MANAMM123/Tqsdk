@@ -28,7 +28,6 @@ except Exception:  # pragma: no cover
 
 try:
     from engine import EXCHANGES, Engine
-
     IMPORT_ERROR = None
 except Exception as _exc:
     EXCHANGES = {"SHFE": "上期所", "DCE": "大商所", "CZCE": "郑商所", "CFFEX": "中金所"}
@@ -54,6 +53,9 @@ GREEN = "#00d68f"
 RED = "#ff3b3b"
 YELLOW = "#ffb000"
 PURPLE = "#b388ff"
+BLUE = "#4f9dff"
+
+APP_VERSION = "1.2.0"
 
 
 def _valid(x) -> bool:
@@ -208,10 +210,11 @@ class ChartPanel:
         ax.grid(color=BORDER, alpha=0.4, linestyle="--", linewidth=0.5)
         return ax
 
-    def draw(self):
+    def draw(self, tight: bool = True):
         if not HAS_MPL:
             return
-        self.figure.tight_layout()
+        if tight:
+            self.figure.tight_layout()
         self.canvas.draw_idle()
 
     def save_png(self, path):
@@ -244,6 +247,7 @@ class App:
         self.df_history: pd.DataFrame | None = None
         self._nav_buttons: dict[str, tk.Button] = {}
         self._current_page = "概览"
+        self._dirty_pages: set[str] = set()
         self._refresh_job = None
         self._last_refresh = ""
         self._action_widgets: list[tk.Widget] = []
@@ -273,7 +277,7 @@ class App:
         return "TkDefaultFont"
 
     def _setup_window(self):
-        self.root.title("期权波动率雷达 · TQSDK")
+        self.root.title(f"期权波动率雷达 · TQSDK v{APP_VERSION}")
         self.root.geometry("1500x920")
         self.root.minsize(1280, 760)
         self.root.configure(bg=BG)
@@ -327,6 +331,8 @@ class App:
         left.pack(side="left", fill="y", padx=10)
         tk.Label(left, text="期权波动率雷达", bg=PANEL, fg=ACCENT,
                  font=(self.font_name, 13, "bold")).pack(side="left")
+        tk.Label(left, text=f"v{APP_VERSION}", bg=PANEL, fg=MUTED,
+                 font=(self.mono_font, 9)).pack(side="left", padx=(6, 0))
         self.status_lbl = tk.Label(left, text="未连接", bg=PANEL, fg=RED,
                                    font=(self.font_name, 10))
         self.status_lbl.pack(side="left", padx=(12, 0))
@@ -430,6 +436,7 @@ class App:
         self._build_cone(self._page_cone)
         self._build_history(self._page_history)
         self._build_cross(self._page_cross)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self._show_page("概览")
 
     # ---- 概览 ----
@@ -477,31 +484,39 @@ class App:
         self.gex_info = tk.Label(top, text="", bg=BG, fg=MUTED, font=(self.mono_font, 9))
         self.gex_info.pack(side="left", padx=12)
 
-        # 4 个 KPI 卡
+        # 7 个 KPI 卡（对齐参考图：现价 / Net GEX / Gamma Flip / Max Pain / 两墙 / ATM IV）
         kpi = tk.Frame(parent, bg=BG)
         kpi.pack(fill="x", padx=10)
         self.kpi_cards: dict[str, dict] = {}
-        for key in ["net_gex", "zero_gamma", "call_wall", "put_wall"]:
+        for key in ["price", "net_gex", "gamma_flip", "max_pain", "call_wall", "put_wall", "atm_iv"]:
             self.kpi_cards[key] = self._make_kpi_card(kpi, key)
 
-        # 关键价位卡片（参考图样式）
-        lvl = tk.Frame(parent, bg=BG)
-        lvl.pack(fill="x", padx=10, pady=(8, 0))
-        self.level_cards: dict[str, dict] = {}
-        for key in ["call_wall", "put_wall", "gamma_wall", "vol_trigger"]:
-            self.level_cards[key] = self._make_level_card(lvl, key)
+        # 读图结论：区域 → 距墙 → Flip 三步读数
+        concl = tk.Frame(parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        concl.pack(fill="x", padx=10, pady=(8, 0))
+        head = tk.Frame(concl, bg=CARD)
+        head.pack(fill="x", padx=8, pady=(4, 0))
+        tk.Label(head, text="读图结论", bg=CARD, fg=ACCENT,
+                 font=(self.font_name, 9, "bold")).pack(side="left")
+        tk.Label(head, text="先看区域 → 再看距墙 → 最后盯 Gamma Flip", bg=CARD, fg=MUTED,
+                 font=(self.font_name, 8)).pack(side="left", padx=8)
+        self.gex_conclusion = tk.Label(
+            concl, text="查询后显示：① 区域 ② 距墙距离 ③ Gamma Flip",
+            bg=CARD, fg=FG, font=(self.font_name, 9), justify="left", anchor="w",
+            wraplength=1000)
+        self.gex_conclusion.pack(fill="x", padx=8, pady=(2, 6))
+
+        # GEX 主图
+        self.gex_chart = ChartPanel(parent, figsize=(7.2, 4.0))
+        self.gex_chart.frame.pack(fill="both", expand=True, padx=10, pady=8)
 
         # PCR 日内变化
         pcr_wrap = tk.Frame(parent, bg=BG)
         pcr_wrap.pack(fill="x", padx=10, pady=(6, 0))
         tk.Label(pcr_wrap, text="PCR 日内变化（Put OI / Call OI）", bg=BG, fg=MUTED,
                  font=(self.font_name, 8, "bold")).pack(anchor="w")
-        self.pcr_chart = ChartPanel(pcr_wrap, figsize=(7.2, 1.4))
+        self.pcr_chart = ChartPanel(pcr_wrap, figsize=(7.2, 1.3))
         self.pcr_chart.frame.pack(fill="x")
-
-        # 图表
-        self.gex_chart = ChartPanel(parent, figsize=(7.2, 3.6))
-        self.gex_chart.frame.pack(fill="both", expand=True, padx=10, pady=8)
 
         # 明细表
         body = tk.Frame(parent, bg=BG)
@@ -512,37 +527,24 @@ class App:
         self.gex_tree.bind("<Double-1>", self._on_gex_double)
 
     def _make_kpi_card(self, parent, key: str) -> dict:
-        colors = {"net_gex": (CYAN, "净GEX"), "zero_gamma": (YELLOW, "零伽马位"),
-                  "call_wall": (GREEN, "看涨阻力 Call Wall"), "put_wall": (RED, "看跌支撑 Put Wall")}
+        colors = {
+            "price": (ACCENT, "最新价 F"),
+            "net_gex": (CYAN, "NET GEX"),
+            "gamma_flip": (YELLOW, "GAMMA FLIP"),
+            "max_pain": (BLUE, "MAX PAIN"),
+            "call_wall": (GREEN, "CALL WALL"),
+            "put_wall": (RED, "PUT WALL"),
+            "atm_iv": (PURPLE, "ATM IV"),
+        }
         color, label = colors[key]
         card = tk.Frame(parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        card.pack(side="left", expand=True, fill="x", padx=3)
-        tk.Label(card, text=label, bg=CARD, fg=MUTED, font=(self.font_name, 8)).pack(anchor="w", padx=8, pady=(5, 0))
-        val = tk.Label(card, text="—", bg=CARD, fg=color, font=(self.mono_font, 16, "bold"))
-        val.pack(anchor="w", padx=8, pady=(1, 0))
+        card.pack(side="left", expand=True, fill="x", padx=2)
+        tk.Label(card, text=label, bg=CARD, fg=MUTED, font=(self.font_name, 8)).pack(anchor="w", padx=7, pady=(4, 0))
+        val = tk.Label(card, text="—", bg=CARD, fg=color, font=(self.mono_font, 13, "bold"))
+        val.pack(anchor="w", padx=7, pady=(0, 0))
         sub = tk.Label(card, text="", bg=CARD, fg=MUTED, font=(self.mono_font, 8))
-        sub.pack(anchor="w", padx=8, pady=(0, 5))
+        sub.pack(anchor="w", padx=7, pady=(0, 4))
         return {"card": card, "val": val, "sub": sub, "color": color}
-
-    def _make_level_card(self, parent, key: str) -> dict:
-        palette = {
-            "call_wall": (GREEN, "① 看涨阻力位", "Call Wall", "价格向上易遇天花板"),
-            "put_wall": (RED, "② 看跌支撑位", "Put Wall", "价格向下易托住地板"),
-            "gamma_wall": (YELLOW, "③ 伽马关键位", "Gamma Wall", "价格容易被钉住波动收敛"),
-            "vol_trigger": (PURPLE, "④ 波动变化位", "Vol Trigger", "市场可能从收敛切换为放大"),
-        }
-        color, title, en, hint = palette[key]
-        card = tk.Frame(parent, bg=CARD, highlightbackground=color, highlightthickness=2)
-        card.pack(side="left", expand=True, fill="x", padx=3, pady=4)
-        head = tk.Frame(card, bg=CARD)
-        head.pack(fill="x", padx=8, pady=(5, 0))
-        tk.Label(head, text=title, bg=CARD, fg=color, font=(self.font_name, 9, "bold")).pack(side="left")
-        tk.Label(head, text=en, bg=CARD, fg=MUTED, font=(self.mono_font, 8)).pack(side="right")
-        val = tk.Label(card, text="—", bg=CARD, fg=FG, font=(self.mono_font, 15, "bold"))
-        val.pack(anchor="w", padx=8, pady=(2, 0))
-        sub = tk.Label(card, text=hint, bg=CARD, fg=MUTED, font=(self.font_name, 8), wraplength=150, justify="left")
-        sub.pack(anchor="w", padx=8, pady=(0, 5))
-        return {"val": val, "sub": sub, "card": card, "color": color}
 
     # ---- 偏度 ----
     def _build_skew(self, parent):
@@ -644,6 +646,25 @@ class App:
             self.notebook.select(idx)
         except Exception:
             pass
+        self._sync_nav(name)
+        # 切换时补画标记为脏的页面
+        if name in self._dirty_pages:
+            self._fill_page(name)
+
+    def _on_tab_changed(self, _event=None):
+        """用户直接点 notebook 标签时同步当前页。"""
+        try:
+            name = PAGES[self.notebook.index("current")]
+        except Exception:
+            return
+        if name == self._current_page:
+            return
+        self._current_page = name
+        self._sync_nav(name)
+        if name in self._dirty_pages:
+            self._fill_page(name)
+
+    def _sync_nav(self, name: str):
         for n, b in self._nav_buttons.items():
             b.configure(bg=ACCENT if n == name else PANEL, fg="#111" if n == name else FG)
 
@@ -767,12 +788,26 @@ class App:
             return
         self._last_refresh = self._now()
         self.time_lbl.configure(text=f"更新 {self._last_refresh}")
-        self._fill_chain()
-        self._fill_gex()
-        self._fill_skew()
-        self._fill_cone()
-        self._fill_history()
+        # 只重绘当前可见页，其余页面标脏、切换时再画（降低刷新开销）
+        self._dirty_pages = {"期权链", "GEX分析", "偏度", "波动率锥", "历史"}
+        self._fill_page(self._current_page)
         self._check_alerts()
+
+    def _fill_page(self, name: str):
+        if not self.chain_result:
+            return
+        fillers = {
+            "期权链": self._fill_chain,
+            "GEX分析": self._fill_gex,
+            "偏度": self._fill_skew,
+            "波动率锥": self._fill_cone,
+            "历史": self._fill_history,
+        }
+        fn = fillers.get(name)
+        if fn is None:
+            return
+        fn()
+        self._dirty_pages.discard(name)
 
     def _on_scan(self):
         self._submit(self.engine.scan_exchange, self.exchange, callback=self._after_scan)
@@ -855,103 +890,136 @@ class App:
         m = r["metrics"]
         F = r["F"]
         self.gex_info.configure(
-            text=f"F={fnum(F)} | 净GEX={fyi(m['net_gex'])} | Call={fyi(m['call_gex'])} | Put={fyi(m['put_gex'])}")
+            text=f"{r['exchange']}.{r['product']} {r['expiry']} | {r['days']}天 | 合约 {m['contracts']}")
 
-        # KPI
-        self._set_kpi("net_gex", fyi(m["net_gex"]), f"零伽马 {fnum(m['zero_gamma'], 1)}")
-        self._set_kpi("zero_gamma", fnum(m["zero_gamma"], 1), fpct(m["key_levels"]["zero_gamma"]["dist_pct"]))
-        self._set_kpi("call_wall", fnum(m["call_wall"], 1), fpct(m["key_levels"]["call_wall"]["dist_pct"]))
-        self._set_kpi("put_wall", fnum(m["put_wall"], 1), fpct(m["key_levels"]["put_wall"]["dist_pct"]))
+        # KPI（7 卡，对齐参考图）
+        self._set_kpi("price", fnum(F, 1), f"标的 {r['spot_symbol']}")
+        self._set_kpi("net_gex", fyi(m["net_gex"]),
+                      f"Call {fyi(m['call_gex'])} / Put {fyi(m['put_gex'])}")
+        self._set_kpi("gamma_flip", fnum(m["zero_gamma"], 1),
+                      fpct(m["key_levels"]["zero_gamma"]["dist_pct"]))
+        self._set_kpi("max_pain", fnum(m.get("max_pain"), 1),
+                      fpct(m["key_levels"]["max_pain"]["dist_pct"]))
+        self._set_kpi("call_wall", fnum(m["call_wall"], 1),
+                      fpct(m["key_levels"]["call_wall"]["dist_pct"]))
+        self._set_kpi("put_wall", fnum(m["put_wall"], 1),
+                      fpct(m["key_levels"]["put_wall"]["dist_pct"]))
+        self._set_kpi("atm_iv", fvol(m["atm_iv"]), f"HV20 {fvol(m['hv20'])}")
 
-        # 关键价位卡
-        for key in ["call_wall", "put_wall", "gamma_wall", "vol_trigger"]:
-            lv = m["key_levels"][key]
-            self.level_cards[key]["val"].configure(text=fnum(lv["strike"], 1))
-            self.level_cards[key]["sub"].configure(
-                text=f"{lv['hint']} | 距现价 {fpct(lv['dist_pct'])}")
-            # 异动高亮：距现价绝对值 < 0.5% 时边框加粗变色
-            near = _valid(lv["dist_pct"]) and abs(lv["dist_pct"]) < 0.5
-            self.level_cards[key]["card"].configure(
-                highlightbackground=YELLOW if near else self.level_cards[key]["color"])
+        # 读图结论（区域 → 距墙 → Flip）
+        self.gex_conclusion.configure(text=self._gex_reading(r))
 
         # 图表
         ax = self.gex_chart.axes()
+        fig = self.gex_chart.figure
         if ax is not None and gex is not None and not gex.empty:
-            strikes = gex["strike"].values
+            strikes = gex["strike"].values.astype(float)
             net = gex["net_gex"].values
             cum = gex["cum_net_gex"].values
             n = len(strikes)
+            x0, x1 = float(strikes.min()), float(strikes.max())
+            span = max(x1 - x0, 1.0)
+            step = span / max(n - 1, 1)
+            scale = 1e8
 
-            # 柱：按净GEX符号上色，按幅度设透明度（更暗=更大）
+            # 区域底色：Gamma Flip 左侧=负Gamma区，右侧=正Gamma区
+            zg = m.get("zero_gamma")
+            if _valid(zg) and x0 < zg < x1:
+                ax.axvspan(x0, zg, color=RED, alpha=0.045, zorder=0)
+                ax.axvspan(zg, x1, color=ACCENT, alpha=0.055, zorder=0)
+                ax.text(0.015, 0.03, "负 Gamma 区 · 放大波动", transform=ax.transAxes,
+                        color=RED, fontsize=7.5, va="bottom", alpha=0.95,
+                        bbox=dict(boxstyle="round,pad=0.18", fc=BG, ec="none", alpha=0.6))
+                ax.text(0.985, 0.03, "正 Gamma 区 · 压制波动", transform=ax.transAxes,
+                        color=ACCENT, fontsize=7.5, ha="right", va="bottom", alpha=0.95,
+                        bbox=dict(boxstyle="round,pad=0.18", fc=BG, ec="none", alpha=0.6))
+
+            # 柱：正=红（Call 堆），负=绿（Put 堆），透明度随幅度加深
             abs_net = np.abs(net)
             max_abs = abs_net.max() if abs_net.max() > 0 else 1.0
             bar_colors = []
             for v, a in zip(net, abs_net):
-                if v >= 0:
-                    alpha = 0.35 + 0.6 * (a / max_abs)
-                    bar_colors.append((0.0, 0.84, 0.56, alpha))  # GREEN
-                else:
-                    alpha = 0.35 + 0.6 * (a / max_abs)
-                    bar_colors.append((1.0, 0.23, 0.23, alpha))  # RED
-            step = (strikes[-1] - strikes[0]) / max(n - 1, 1) if n > 1 else 1.0
-            width = step * 0.62
-            ax.bar(strikes, net / 1e8, color=bar_colors, width=width, edgecolor="none",
-                   label="净GEX(亿)")
-            ax.axhline(0, color=BORDER, linewidth=0.8)
+                alpha = 0.30 + 0.60 * (a / max_abs)
+                bar_colors.append((1.0, 0.30, 0.36, alpha) if v >= 0 else (0.0, 0.80, 0.55, alpha))
+            ax.bar(strikes, net / scale, color=bar_colors, width=step * 0.60,
+                   edgecolor="none", zorder=2)
+            ax.axhline(0, color=BORDER, linewidth=0.8, zorder=1)
 
-            # 累计净GEX：白色粗线 + 下方淡色填充，与零伽马竖线区分
+            # 累计净GEX：白色主曲线 + 淡填充
             ax2 = ax.twinx()
-            ax2.plot(strikes, cum / 1e8, color=FG, linewidth=2.0, zorder=3, label="累计净GEX(亿)")
-            ax2.fill_between(strikes, 0, cum / 1e8, color=CYAN, alpha=0.10, zorder=1)
+            ax2.plot(strikes, cum / scale, color=FG, linewidth=1.9, zorder=4)
+            ax2.fill_between(strikes, 0, cum / scale, color=FG, alpha=0.05, zorder=1)
             ax2.axhline(0, color=BORDER, linewidth=0.8)
 
-            # 关键价位竖线：精简标注，避免重叠
-            markers = [
-                (m["zero_gamma"], CYAN, "ZG", "Zero Gamma"),
-                (m["call_wall"], GREEN, "CW", "Call Wall"),
-                (m["put_wall"], RED, "PW", "Put Wall"),
-                (m["gamma_wall"], YELLOW, "GW", "Gamma Wall"),
-                (m["vol_trigger"], PURPLE, "VT", "Vol Trigger"),
-            ]
-            y_top = net.max() / 1e8 * 0.92 if net.max() > 0 else 0.05
-            valid = [(s, c, l) for s, c, l, _ in markers if _valid(s)]
-            # 简单去重：相邻标签错开上下
-            label_y = []
-            for s, c, l in valid:
-                ax.axvline(s, color=c, linestyle="--", linewidth=1.1, alpha=0.9)
-                # 选择上下位置避免重叠
-                placed_below = any(abs(s - s2) < step * 1.5 for s2 in label_y)
-                yy = y_top * (0.42 if placed_below else 0.96)
-                label_y.append(s)
-                ax.text(s, yy, f"{l}\n{fnum(s, 1)}", color=c, fontsize=6.5,
-                        ha="center", va="top",
-                        bbox=dict(boxstyle="round,pad=0.15", fc=CARD, ec=c, lw=0.6, alpha=0.92))
+            def _curve_at(s):
+                return float(np.interp(s, strikes, cum)) / scale
 
-            # 现价 F：琥珀色实线，最醒目
-            ax.axvline(F, color=ACCENT, linestyle="-", linewidth=1.8, alpha=0.95, zorder=4)
-            ax.text(F, net.min() / 1e8 * 0.88 if net.min() < 0 else -0.05,
-                    f"F={fnum(F, 1)}", color=ACCENT, fontsize=8, ha="center", va="top",
-                    fontweight="bold")
+            # 墙：细虚线 + 曲线上的圆圈；Flip / Max Pain：醒目虚线
+            labels = []
+            for s, c, name in [(m.get("call_wall"), GREEN, "Call Wall"),
+                               (m.get("put_wall"), RED, "Put Wall")]:
+                if not _valid(s):
+                    continue
+                ax.axvline(s, color=c, linestyle="--", linewidth=1.0, alpha=0.5, zorder=3)
+                ax2.plot([s], [_curve_at(s)], marker="o", markersize=6.5, markerfacecolor=CARD,
+                         markeredgecolor=c, markeredgewidth=1.6, linestyle="none", zorder=6)
+                labels.append(((s - x0) / span, 0.78, f"{name} {fnum(s, 1)}", c))
+            for s, c, name in [(m.get("zero_gamma"), YELLOW, "Gamma Flip"),
+                               (m.get("max_pain"), BLUE, "Max Pain")]:
+                if not _valid(s):
+                    continue
+                ax.axvline(s, color=c, linestyle="--", linewidth=1.25, alpha=0.95, zorder=3)
+                labels.append(((s - x0) / span, 0.97, f"{name} {fnum(s, 1)}", c))
 
-            ax.set_xlabel("行权价", color=MUTED, fontsize=8)
+            # 标签错位排布，避免互相压字
+            labels.sort(key=lambda t: t[0])
+            placed: list[float] = []
+            for xf, yf, text, color in labels:
+                if any(abs(xf - px) < 0.10 for px in placed):
+                    yf = min(yf, 0.64)
+                placed.append(xf)
+                ha = "left" if xf > 0.92 else ("right" if xf < 0.08 else "center")
+                ax.annotate(text, xy=(xf, yf), xycoords="axes fraction", ha=ha, va="top",
+                            color=color, fontsize=7, annotation_clip=False,
+                            bbox=dict(boxstyle="round,pad=0.22", fc=CARD, ec=color, lw=0.7, alpha=0.95))
+
+            # 最新价：琥珀色实线 + 轴下方高亮标签（不遮挡曲线）
+            ax.axvline(F, color=ACCENT, linewidth=1.6, alpha=0.95, zorder=5)
+            fx = min(max((F - x0) / span, 0.10), 0.90)
+            ax.annotate(f"最新价 {fnum(F, 1)} · NET GEX {fyi(m['net_gex'])}",
+                        xy=(fx, -0.055), xycoords="axes fraction", ha="center", va="top",
+                        color=ACCENT, fontsize=7.5, fontweight="bold", annotation_clip=False,
+                        bbox=dict(boxstyle="round,pad=0.32", fc="#2b2410", ec=ACCENT, lw=0.8, alpha=0.95))
+
             ax.set_ylabel("净GEX (亿)", color=MUTED, fontsize=8)
             ax2.set_ylabel("累计净GEX (亿)", color=FG, fontsize=8)
+            ax.tick_params(colors=MUTED, labelsize=8)
             ax2.tick_params(axis="y", colors=FG, labelsize=8)
-            ax.tick_params(axis="y", colors=MUTED, labelsize=8)
-            ax.set_title("GEX 分布 · 累计净GEX · 五大关键价位", color=FG, fontsize=9.5, pad=6)
+            # 关掉科学计数法的 1e6 偏移，避免读数被误读
+            from matplotlib.ticker import ScalarFormatter
+            for axis in (ax.yaxis, ax2.yaxis):
+                fmt = ScalarFormatter(useOffset=False)
+                fmt.set_scientific(False)
+                axis.set_major_formatter(fmt)
+            ax.set_title(f"{r['product'].upper()} · GEX 结构", color=FG, fontsize=9.5, pad=8)
 
-            # 小图例
-            from matplotlib.patches import Patch
             from matplotlib.lines import Line2D
+            from matplotlib.patches import Patch
             handles = [
-                Patch(facecolor=GREEN, edgecolor="none", alpha=0.8, label="净GEX>0"),
-                Patch(facecolor=RED, edgecolor="none", alpha=0.8, label="净GEX<0"),
-                Line2D([0], [0], color=FG, linewidth=2, label="累计净GEX"),
-                Line2D([0], [0], color=ACCENT, linewidth=1.8, label=f"现价 F={fnum(F, 1)}"),
+                Patch(facecolor=(1.0, 0.30, 0.36), alpha=0.8, label="正GEX柱 (Call)"),
+                Patch(facecolor=(0.0, 0.80, 0.55), alpha=0.8, label="负GEX柱 (Put)"),
+                Line2D([0], [0], color=FG, linewidth=1.9, label="累计净GEX"),
+                Line2D([0], [0], color=ACCENT, linewidth=1.6, label=f"最新价 {fnum(F, 1)}"),
+                Line2D([0], [0], color=YELLOW, linestyle="--", linewidth=1.2, label="Gamma Flip"),
+                Line2D([0], [0], color=BLUE, linestyle="--", linewidth=1.2, label="Max Pain"),
+                Line2D([0], [0], color=GREEN, linestyle="--", linewidth=1.0, label="Call Wall"),
+                Line2D([0], [0], color=RED, linestyle="--", linewidth=1.0, label="Put Wall"),
             ]
-            ax.legend(handles=handles, loc="upper left", fontsize=7, facecolor=CARD,
-                      edgecolor=BORDER, labelcolor=FG, framealpha=0.92, handlelength=1.6)
-        self.gex_chart.draw()
+            fig.legend(handles=handles, loc="lower center", ncol=8, fontsize=6.5,
+                       bbox_to_anchor=(0.5, 0.014), frameon=False, labelcolor=MUTED,
+                       handlelength=1.3, columnspacing=0.9, handletextpad=0.5)
+            fig.subplots_adjust(left=0.075, right=0.915, top=0.90, bottom=0.215)
+        self.gex_chart.draw(tight=False)
 
         # 明细表
         t = self.gex_tree
@@ -978,6 +1046,48 @@ class App:
             ax3.text(0.5, 0.5, "开启自动刷新后显示 PCR 日内轨迹", color=MUTED, ha="center", va="center", fontsize=8)
             ax3.axis("off")
         self.pcr_chart.draw()
+
+    def _gex_reading(self, r) -> str:
+        """按「区域 → 距墙 → Gamma Flip」三步生成读图结论。"""
+        m, F = r["metrics"], r["F"]
+        if not _valid(F):
+            return "现价缺失，无法读图（可稍后刷新重试）。"
+        zg, cw, pw, mp = (m.get("zero_gamma"), m.get("call_wall"),
+                          m.get("put_wall"), m.get("max_pain"))
+        atm = m.get("atm_iv")
+
+        if _valid(zg):
+            above = F >= zg
+            zone = "正Gamma区（对冲盘压波动，行情易收敛）" if above else "负Gamma区（对冲盘追涨杀跌，波动被放大）"
+            action = "适合卖波动、赚收敛的钱" if above else "别急着抄底摸顶，让趋势走"
+            gap = (F - zg) / F * 100.0
+            flip = (f"现价在 Gamma Flip 上方 {gap:.2f}%，处于收敛一侧；"
+                    if above else f"现价在 Gamma Flip 下方 {abs(gap):.2f}%，处于放大一侧；")
+            if abs(gap) < 0.3:
+                flip += "贴边运行是最典型的变盘前画面，留意下一小时柱子。"
+        else:
+            zone, action, flip = "—", "—", "未检出 Gamma Flip（累计净GEX未穿零）。"
+
+        d_cw = (cw - F) / F * 100.0 if _valid(cw) else float("nan")
+        d_pw = (pw - F) / F * 100.0 if _valid(pw) else float("nan")
+        if _valid(d_cw) and _valid(d_pw):
+            if abs(d_cw) < 0.5 or abs(d_pw) < 0.5:
+                wall = "已贴墙，容易出事，注意方向选择"
+            else:
+                wall = "上下都不挨墙，属舒适区，适合磨时间"
+        else:
+            wall = "关键位不足，暂无法判断空间"
+
+        line1 = f"① 区域：现价 {fnum(F, 1)} 在 {zone}，{action}。"
+        line2 = (f"② 距墙：上方 Call Wall {fnum(cw, 1)}（{fpct(d_cw)}）、"
+                 f"下方 Put Wall {fnum(pw, 1)}（{fpct(d_pw)}），{wall}；"
+                 f"Max Pain {fnum(mp, 1)} 为到期引力中心。")
+        line3 = f"③ Flip：{flip}"
+        if _valid(atm):
+            line3 += (f" ATM IV {fvol(atm)}，"
+                      + ("正区＋高隐波，卖波动更舒服。" if _valid(zg) and F >= zg
+                         else "负区优先顺势，别逆势卖波动。"))
+        return "\n".join([line1, line2, line3])
 
     def _set_kpi(self, key, val, sub):
         self.kpi_cards[key]["val"].configure(text=val)

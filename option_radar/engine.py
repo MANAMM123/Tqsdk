@@ -74,6 +74,10 @@ class Engine(threading.Thread):
         self._products: dict[str, list[dict]] = {}
         self._closes: dict[str, list[float]] = {}
         self._long_closes: dict[str, list[float]] = {}
+        # 行情/K线缓存：重复查询不再二次拉取
+        self._quotes: dict[str, object] = {}
+        self._kline_ts: dict[str, float] = {}
+        self._KLINE_TTL = 600.0  # 日线 10 分钟内复用
         # 日内 PCR 追踪：key="exchange.product.expiry", value=[(ts, pcr, f)]
         self._pcr_log: dict[str, list[tuple]] = {}
         self._data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -130,6 +134,9 @@ class Engine(threading.Thread):
         self._meta.clear()
         self._products.clear()
         self._closes.clear()
+        self._long_closes.clear()
+        self._quotes.clear()
+        self._kline_ts.clear()
         self.api = TqApi(auth=TqAuth(username, password), disable_print=True, web_gui=False)
         self.notify("status", f"已登录：{self._mask(username)}")
         return True
@@ -278,19 +285,29 @@ class Engine(threading.Thread):
         return products
 
     # ---------------------------------------------------------------- quotes
+    def _get_quote(self, symbol: str):
+        """复用已订阅行情，避免重复订阅带来的额外等待。"""
+        quote = self._quotes.get(symbol)
+        if quote is None:
+            quote = self._require_api().get_quote(symbol)
+            self._quotes[symbol] = quote
+        return quote
+
     def _wait_quotes(self, quotes: list, timeout: float, min_ratio: float = 0.5) -> bool:
         api = self._require_api()
         deadline = time.time() + timeout
         need = max(1, int(len(quotes) * min_ratio))
-        while time.time() < deadline:
+        while True:
             ready = sum(1 for q in quotes if str(getattr(q, "datetime", "") or "").strip())
             if ready >= need:
                 return True
+            remain = deadline - time.time()
+            if remain <= 0:
+                return False
             try:
-                api.wait_update(deadline=min(time.time() + 0.4, deadline))
+                api.wait_update(deadline=time.time() + min(0.12, remain))
             except Exception:
-                time.sleep(0.1)
-        return False
+                time.sleep(0.05)
 
     @staticmethod
     def _quote_price(q) -> tuple[float, str]:
@@ -304,9 +321,8 @@ class Engine(threading.Thread):
                 return v, label
         return float("nan"), ""
 
-    def _resolve_spot(self, underlying: str, exchange: str, product: str,
-                      expiry_key: str) -> tuple[str, float]:
-        api = self._require_api()
+    def _spot_candidates(self, underlying: str, exchange: str, product: str,
+                         expiry_key: str) -> list[str]:
         candidates = []
         if underlying:
             candidates.append(underlying)
@@ -318,55 +334,73 @@ class Engine(threading.Thread):
                 candidates.append(f"KQ.m@{CFFEX_FUTURE[product]}")
         elif underlying == "":
             candidates.append(f"{exchange}.{product}{expiry_key}")
+        seen, out = set(), []
+        for s in candidates:
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
 
-        seen = set()
-        for symbol in candidates:
-            if not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
+    def _prime_spot(self, underlying: str, exchange: str, product: str, expiry_key: str):
+        """在等待期权行情之前先订阅标的，把两次等待合并成一次。"""
+        for symbol in self._spot_candidates(underlying, exchange, product, expiry_key):
             try:
-                quote = api.get_quote(symbol)
+                self._get_quote(symbol)
             except Exception:
                 continue
-            deadline = time.time() + 4
+
+    def _resolve_spot(self, underlying: str, exchange: str, product: str,
+                      expiry_key: str, timeout: float = 1.5) -> tuple[str, float]:
+        for symbol in self._spot_candidates(underlying, exchange, product, expiry_key):
+            try:
+                quote = self._get_quote(symbol)
+            except Exception:
+                continue
+            deadline = time.time() + timeout
             while time.time() < deadline:
                 price, _ = self._quote_price(quote)
                 if _finite(price) and price > 0:
                     return symbol, price
                 try:
-                    api.wait_update(deadline=min(time.time() + 0.4, deadline))
+                    self._require_api().wait_update(deadline=time.time() + 0.15)
                 except Exception:
                     break
         return "", float("nan")
 
-    def _closes_for(self, symbol: str, timeout: float = 10, length: int = 140) -> list[float]:
+    def _closes_for(self, symbol: str, timeout: float = 8, length: int = 300) -> list[float]:
+        """一次拉取足够长的日线并缓存：HV 与波动率锥共用，避免重复请求。"""
         if not symbol:
             return []
-        cache = self._long_closes if length > 140 else self._closes
-        if symbol in cache:
-            return cache[symbol]
+        cached = self._closes.get(symbol)
+        if cached and time.time() - self._kline_ts.get(symbol, 0.0) < self._KLINE_TTL:
+            return cached
         api = self._require_api()
         try:
             klines = api.get_kline_serial(symbol, 86400, data_length=length)
         except Exception:
-            cache[symbol] = []
-            return []
+            return cached or []
         deadline = time.time() + timeout
-        closes: list[float] = []
-        while time.time() < deadline:
-            closes = [float(c) for c in klines["close"].tolist() if _finite(c)]
+        closes: list[float] = cached or []
+        while True:
+            fresh = [float(c) for c in klines["close"].tolist() if _finite(c)]
+            if len(fresh) > len(closes):
+                closes = fresh
             if len(closes) >= min(25, length):
                 break
+            remain = deadline - time.time()
+            if remain <= 0:
+                break
             try:
-                api.wait_update(deadline=min(time.time() + 0.4, deadline))
+                api.wait_update(deadline=time.time() + min(0.12, remain))
             except Exception:
                 break
-        cache[symbol] = closes
+        self._closes[symbol] = closes
+        self._kline_ts[symbol] = time.time()
         return closes
 
     # ---------------------------------------------------------------- chain
     def query_chain(self, exchange: str, product: str, expiry_key: str,
-                    wait: float = 15) -> dict:
+                    wait: float = 6) -> dict:
         api = self._require_api()
         if exchange not in self._meta:
             self.load_products(exchange)
@@ -376,24 +410,29 @@ class Engine(threading.Thread):
             raise RuntimeError(f"未找到 {product} {expiry_key} 期权合约。")
 
         symbols = sub["instrument_id"].tolist()
+        row0 = sub.iloc[0]
+        underlying = str(row0.get("underlying") or "")
+        # 先订阅标的，与期权行情并行等待
+        self._prime_spot(underlying, exchange, product, expiry_key)
+
         self.notify("status", f"订阅 {product} {expiry_key} 行情（{len(symbols)} 个合约）…")
         quotes = {}
         for symbol in symbols:
             try:
-                quotes[symbol] = api.get_quote(symbol)
+                quotes[symbol] = self._get_quote(symbol)
             except Exception:
                 continue
         if not quotes:
             raise RuntimeError("行情订阅失败。")
         self._wait_quotes(list(quotes.values()), timeout=wait)
 
-        row0 = sub.iloc[0]
-        underlying = str(row0.get("underlying") or "")
         spot_symbol, F = self._resolve_spot(underlying, exchange, product, expiry_key)
 
+        # 预先建立合约元数据索引，避免循环里 O(N²) 的 DataFrame 过滤
+        meta_by_symbol = sub.set_index("instrument_id")
         rows = []
         for symbol, quote in quotes.items():
-            mrow = sub[sub["instrument_id"] == symbol].iloc[0]
+            mrow = meta_by_symbol.loc[symbol]
             price, source = self._quote_price(quote)
             strike = _num(getattr(quote, "strike_price", None))
             if not _finite(strike) or strike <= 0:
@@ -442,23 +481,22 @@ class Engine(threading.Thread):
         chain = chain.sort_values(["strike", "option_class"]).reset_index(drop=True)
 
         spot_for_hv = spot_symbol
+        # 一次拉取 300 根日线：HV20/60 与波动率锥共用同一份数据（只请求一次）
         closes = self._closes_for(spot_for_hv)
         if not closes and exchange == "CFFEX":
             closes = self._closes_for(f"KQ.m@{CFFEX_FUTURE.get(product, '')}")
         hv20 = calc.hv_from_closes(closes, 20)
         hv60 = calc.hv_from_closes(closes, 60)
-        metrics = calc.summary_metrics(chain, F, hv20, hv60)
         gex = calc.gex_table(chain)
-
-        # 波动率锥：用更长的历史（300 日）
-        long_closes = self._closes_for(spot_for_hv, length=300)
-        if not long_closes and exchange == "CFFEX":
-            long_closes = self._closes_for(f"KQ.m@{CFFEX_FUTURE.get(product, '')}", length=300)
-        cone = calc.vol_cone(long_closes, current_iv=metrics["atm_iv"])
+        metrics = calc.summary_metrics(chain, F, hv20, hv60, gex_df=gex)
+        cone = calc.vol_cone(closes, current_iv=metrics["atm_iv"])
 
         # 日内 PCR 追踪
         key = f"{exchange}.{product}.{expiry_key}"
-        self._pcr_log.setdefault(key, []).append((time.time(), metrics["pcr_oi"], F))
+        log = self._pcr_log.setdefault(key, [])
+        log.append((time.time(), metrics["pcr_oi"], F))
+        if len(log) > 400:
+            del log[:-400]
         pcr_series = pd.DataFrame(self._pcr_log[key], columns=["ts", "pcr", "F"])
         pcr_series["time"] = pd.to_datetime(pcr_series["ts"], unit="s").dt.strftime("%H:%M:%S")
 
@@ -511,6 +549,33 @@ class Engine(threading.Thread):
         rows = []
         errors = []
         total = len(products)
+
+        # 批量预订阅：一次性订阅所有品种当月合约，把 N 次等待合并成 1 次
+        plan = []
+        for prod in products:
+            exps = [e for e in prod["expiries"] if _finite(e["days"]) and e["days"] >= 0] or prod["expiries"]
+            if not exps:
+                continue
+            plan.append((prod["product"], exps[0]))
+        meta = self._meta.get(exchange)
+        if meta is not None and plan:
+            symbols = []
+            for pid, exp in plan:
+                part = meta[(meta["product_id"] == pid) & (meta["expiry_key"] == exp["key"])]
+                symbols.extend(part["instrument_id"].tolist())
+                self._prime_spot(str(part["underlying"].iloc[0]) if not part.empty else "",
+                                 exchange, pid, exp["key"])
+            if symbols:
+                self.notify("status", f"批量订阅 {len(symbols)} 个合约…")
+                sub_quotes = []
+                for s in symbols:
+                    try:
+                        sub_quotes.append(self._get_quote(s))
+                    except Exception:
+                        continue
+                if sub_quotes:
+                    self._wait_quotes(sub_quotes, timeout=8, min_ratio=0.6)
+
         for i, prod in enumerate(products):
             pid = prod["product"]
             exps = [e for e in prod["expiries"] if _finite(e["days"]) and e["days"] >= 0] or prod["expiries"]
@@ -519,7 +584,7 @@ class Engine(threading.Thread):
             expiry = exps[0]
             self.notify("progress", f"扫描 {pid} 到期 {expiry['key']}（{i + 1}/{total}）", i / total)
             try:
-                res = self.query_chain(exchange, pid, expiry["key"], wait=10)
+                res = self.query_chain(exchange, pid, expiry["key"], wait=2)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{pid}: {exc}")
                 continue
