@@ -55,7 +55,7 @@ YELLOW = "#ffb000"
 PURPLE = "#b388ff"
 BLUE = "#4f9dff"
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 
 def _valid(x) -> bool:
@@ -361,7 +361,7 @@ class App:
         self.expiry_combo.bind("<<ComboboxSelected>>", lambda e: self._on_expiry_change())
 
         # 刷新间隔
-        tk.Label(bar, text="刷新", bg=PANEL, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=(10, 0))
+        tk.Label(bar, text="自动刷新", bg=PANEL, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=(10, 0))
         self.refresh_combo = ttk.Combobox(bar, values=["关", "5s", "10s", "15s", "30s"], width=5, state="readonly")
         self.refresh_combo.set("关" if self.cfg.get("refresh_sec", 0) == 0 else f"{self.cfg['refresh_sec']}s")
         self.refresh_combo.pack(side="left", padx=4)
