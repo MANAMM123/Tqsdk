@@ -9,6 +9,8 @@ import json
 import math
 import os
 import queue
+import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
@@ -55,7 +57,7 @@ YELLOW = "#ffb000"
 PURPLE = "#b388ff"
 BLUE = "#4f9dff"
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 
 
 def _valid(x) -> bool:
@@ -251,6 +253,11 @@ class App:
         self._refresh_job = None
         self._last_refresh = ""
         self._action_widgets: list[tk.Widget] = []
+        # 进场信号：ATM IV 触底回升监测
+        self.sound_on = bool(self.cfg.get("sound", True))
+        self._iv_track: dict[str, list[tuple[float, float]]] = {}
+        self._signal_ts: dict[str, float] = {}
+        self._signal_info: dict[str, dict] = {}
 
         self._setup_window()
         self._setup_style()
@@ -381,6 +388,9 @@ class App:
         right.pack(side="right", padx=10)
         self.alert_lbl = tk.Label(right, text="", bg=PANEL, fg=YELLOW, font=(self.font_name, 9, "bold"))
         self.alert_lbl.pack(side="right", padx=8)
+        self.sound_btn = self._mk_btn(right, "信号声:开" if self.sound_on else "信号声:关",
+                                      self._toggle_sound, CARD2)
+        self.sound_btn.pack(side="right", padx=4)
         self.settings_btn = self._mk_btn(right, "账户", self._open_settings, CARD2)
         self.settings_btn.pack(side="right", padx=4)
 
@@ -788,10 +798,90 @@ class App:
             return
         self._last_refresh = self._now()
         self.time_lbl.configure(text=f"更新 {self._last_refresh}")
+        self._check_entry_signal()
         # 只重绘当前可见页，其余页面标脏、切换时再画（降低刷新开销）
         self._dirty_pages = {"期权链", "GEX分析", "偏度", "波动率锥", "历史"}
         self._fill_page(self._current_page)
         self._check_alerts()
+
+    # ---------------------------------------------------------------- entry signal
+    def _toggle_sound(self):
+        self.sound_on = not self.sound_on
+        self.sound_btn.configure(text="信号声:开" if self.sound_on else "信号声:关",
+                                 fg=FG if self.sound_on else MUTED)
+        self.cfg["sound"] = self.sound_on
+        save_config(self.cfg)
+        if self.sound_on:
+            self._play_entry_sound()
+
+    def _play_entry_sound(self):
+        """标准进场提示音：三声上行（880→1175→1568Hz）。"""
+        if not self.sound_on:
+            return
+
+        def _run():
+            try:
+                import winsound  # Windows
+                for freq, dur in ((880, 120), (0, 60), (1175, 120), (0, 60), (1568, 220)):
+                    if freq:
+                        winsound.Beep(freq, dur)
+                    else:
+                        time.sleep(dur / 1000.0)
+                return
+            except Exception:
+                pass
+            try:
+                self.root.bell()
+                time.sleep(0.15)
+                self.root.bell()
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _check_entry_signal(self):
+        """第③步（Gamma Flip）之后：ATM IV 由跌转升，触发标准进场信号。"""
+        if not self.chain_result:
+            return
+        r = self.chain_result
+        iv = r["metrics"].get("atm_iv")
+        key = f"{r['exchange']}.{r['product']}.{r['expiry']}"
+        now = time.time()
+        samples = self._iv_track.setdefault(key, [])
+        if _valid(iv):
+            samples.append((now, float(iv)))
+            if len(samples) > 80:
+                del samples[:-80]
+
+        info = {"trigger": False, "active": False, "text": ""}
+        if _valid(iv):
+            if len(samples) >= 4:
+                window = [v for _, v in samples[-11:-1]]  # 最近 10 次（不含当前）
+                low = min(window)
+                need = max(0.005, 0.03 * low)            # 至少 0.5 个波动点或 3%
+                rebound = float(iv) - low
+                rising = samples[-1][1] > samples[-2][1]
+                prior_fall = (max(window) - low) > 0.002  # 之前确实跌过，才算"再次上升"
+                if rising and rebound >= need and prior_fall:
+                    info = {"trigger": True, "active": True,
+                            "text": (f"④ 信号：ATM IV {fvol(iv)} 自近 10 次低点 {fvol(low)} "
+                                     f"回升 +{rebound * 100:.2f} 个点（+{rebound / low * 100:.1f}%），"
+                                     f"进场信号已触发并响铃。")}
+                    if now - self._signal_ts.get(key, 0.0) >= 180:  # 3 分钟冷却
+                        self._signal_ts[key] = now
+                        self._play_entry_sound()
+                    else:
+                        info["text"] = (f"④ 信号持续：ATM IV {fvol(iv)} 已自低点回升 "
+                                        f"{rebound * 100:+.2f} 个点，冷却中不重复响铃。")
+                else:
+                    info = {"trigger": False, "active": False,
+                            "text": (f"④ 等待：ATM IV {fvol(iv)}，较近 10 次低点 {fvol(low)} "
+                                     f"回升 {rebound * 100:+.2f} 个点，再升 {max(0.0, need - rebound) * 100:.2f} "
+                                     f"个点触发进场信号。")}
+            else:
+                info = {"trigger": False, "active": False,
+                        "text": f"④ 等待：ATM IV {fvol(iv)}，样本 {len(samples)}/4，继续刷新后开始监测。"}
+        self._signal_info[key] = info
 
     def _fill_page(self, name: str):
         if not self.chain_result:
@@ -1087,7 +1177,12 @@ class App:
             line3 += (f" ATM IV {fvol(atm)}，"
                       + ("正区＋高隐波，卖波动更舒服。" if _valid(zg) and F >= zg
                          else "负区优先顺势，别逆势卖波动。"))
-        return "\n".join([line1, line2, line3])
+        lines = [line1, line2, line3]
+        key = f"{r['exchange']}.{r['product']}.{r['expiry']}"
+        info = self._signal_info.get(key) or {}
+        if info.get("text"):
+            lines.append(info["text"])
+        return "\n".join(lines)
 
     def _set_kpi(self, key, val, sub):
         self.kpi_cards[key]["val"].configure(text=val)
@@ -1216,6 +1311,9 @@ class App:
             return
         m = self.chain_result["metrics"]
         alerts = []
+        skey = f"{self.chain_result['exchange']}.{self.chain_result['product']}.{self.chain_result['expiry']}"
+        if (self._signal_info.get(skey) or {}).get("active"):
+            alerts.append("ATM IV 触底回升 · 进场信号")
         for key, name in [("call_wall", "Call Wall"), ("put_wall", "Put Wall")]:
             d = m["key_levels"][key]["dist_pct"]
             if _valid(d) and abs(d) < 0.5:
