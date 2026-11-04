@@ -63,7 +63,7 @@ YELLOW = "#ffb000"
 PURPLE = "#b388ff"
 BLUE = "#4f9dff"
 
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 
 
 def _valid(x) -> bool:
@@ -958,7 +958,8 @@ class App:
         self._crawl_busy = False
         try:
             res = fut.result()
-            n = len(res.get("chain") or [])
+            chain = res.get("chain")
+            n = len(chain) if chain is not None else 0
             self._set_status(f"入库 {exchange}.{product} {expiry} · {n} 合约", CYAN)
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"入库失败 {exchange}.{product} {expiry}：{exc}", RED)
