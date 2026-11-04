@@ -37,6 +37,11 @@ except Exception as _exc:
     Engine = None  # type: ignore[assignment]
     IMPORT_ERROR = _exc
 
+try:
+    from storage import OptionStore
+except Exception:
+    OptionStore = None  # type: ignore[assignment]
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if getattr(__import__("sys"), "frozen", False):
     BASE_DIR = os.path.dirname(__import__("sys").executable)
@@ -58,7 +63,7 @@ YELLOW = "#ffb000"
 PURPLE = "#b388ff"
 BLUE = "#4f9dff"
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 
 
 def _valid(x) -> bool:
@@ -121,6 +126,9 @@ def load_config() -> dict:
         pass
     cfg.setdefault("favorites", [])
     cfg.setdefault("refresh_sec", 0)
+    cfg.setdefault("sound", True)
+    cfg.setdefault("idle_crawl", True)
+    cfg.setdefault("retention_days", 30)
     return cfg
 
 
@@ -268,6 +276,24 @@ class App:
         self._iv_track: dict[str, list[tuple[float, float]]] = {}
         self._signal_ts: dict[str, float] = {}
         self._signal_info: dict[str, dict] = {}
+        # 本地数据库 + 闲时全市场入库
+        self.store = None
+        self.crawl_on = bool(self.cfg.get("idle_crawl", True))
+        self.crawl_plan: list[tuple] = []
+        self.crawl_loaded: set[str] = set()
+        self.crawl_tried: set[str] = set()
+        self.crawl_done = 0
+        self.crawl_total = 0
+        self._crawl_busy = False
+        self._crawl_next_ts = 0.0
+        self._crawl_job = None
+        if OptionStore is not None:
+            try:
+                self.store = OptionStore(os.path.join(BASE_DIR, "data", "option_market.db"),
+                                         int(self.cfg.get("retention_days", 30)))
+            except Exception as exc:  # noqa: BLE001
+                self.store = None
+                self._store_error = str(exc)
 
         self._setup_window()
         self._setup_style()
@@ -465,6 +491,12 @@ class App:
         top.pack(fill="x", padx=10, pady=8)
         self._mk_btn(top, "扫描全品种", self._on_scan, ACCENT, "#111").pack(side="left")
         self._mk_btn(top, "导出 CSV", self._on_export_overview).pack(side="left", padx=6)
+        self.crawl_btn = self._mk_btn(top, "全市场入库:开" if self.crawl_on else "全市场入库:关",
+                                      self._toggle_crawl, CARD2)
+        self.crawl_btn.pack(side="left", padx=6)
+        self.db_lbl = tk.Label(top, text="", bg=BG, fg=MUTED, font=(self.mono_font, 9))
+        self.db_lbl.pack(side="left", padx=10)
+        self._refresh_db_label()
         tk.Label(top, text="双击行跳转期权链", bg=BG, fg=MUTED, font=(self.font_name, 9)).pack(side="left", padx=12)
 
         body = tk.Frame(parent, bg=BG)
@@ -694,6 +726,7 @@ class App:
             self._set_status(f"导入失败：{IMPORT_ERROR}", RED)
             return
         self.engine = Engine(self.cfg, self._notify)
+        self.engine.store = self.store
         self.engine.start()
         if self.cfg.get("username") and os.environ.get("TQ_PASSWORD"):
             self._submit(self.engine.connect, self.cfg["username"], os.environ["TQ_PASSWORD"],
@@ -709,6 +742,7 @@ class App:
         save_config(self.cfg)
         if self.engine is None:
             self.engine = Engine(self.cfg, self._notify)
+            self.engine.store = self.store
             self.engine.start()
         self._submit(self.engine.connect, user, pwd, callback=self._after_connect)
 
@@ -716,6 +750,9 @@ class App:
         self._set_status(f"已登录：{Engine._mask(self.cfg.get('username', ''))}", CYAN)
         self.connected = True
         self._switch_exchange(self.exchange)
+        self._refresh_db_label()
+        if self.crawl_on:
+            self.root.after(3000, self._crawl_tick)
 
     def _switch_exchange(self, ex: str):
         for e, b in self.ex_buttons.items():
@@ -813,6 +850,124 @@ class App:
         self._dirty_pages = {"期权链", "GEX分析", "偏度", "波动率锥", "历史"}
         self._fill_page(self._current_page)
         self._check_alerts()
+        self._refresh_db_label()
+
+    # ---------------------------------------------------------------- idle crawl
+    def _toggle_crawl(self):
+        self.crawl_on = not self.crawl_on
+        self.cfg["idle_crawl"] = self.crawl_on
+        save_config(self.cfg)
+        self.crawl_btn.configure(text="全市场入库:开" if self.crawl_on else "全市场入库:关",
+                                 bg=CARD2 if self.crawl_on else PANEL,
+                                 fg=FG if self.crawl_on else MUTED)
+        if self.crawl_on:
+            self._crawl_next_ts = 0.0
+            self._crawl_tick()
+        else:
+            if self._crawl_job is not None:
+                try:
+                    self.root.after_cancel(self._crawl_job)
+                except Exception:
+                    pass
+                self._crawl_job = None
+        self._refresh_db_label()
+
+    def _db_text(self) -> str:
+        if self.store is None:
+            return "数据库未启用"
+        s = self.store.stats()
+        text = f"DB {s['rows']:,} 行 · {s['chains']:,} 链 · {s['size'] / 1048576:.1f}MB"
+        if self.crawl_total:
+            text += f" · 闲时入库 {self.crawl_done}/{self.crawl_total}"
+            if self.crawl_done >= self.crawl_total and not self.crawl_plan:
+                text += "（本轮完成）"
+        return text
+
+    def _refresh_db_label(self):
+        try:
+            self.db_lbl.configure(text=self._db_text())
+        except Exception:
+            pass
+
+    def _crawl_submit(self, fn, *args, callback=None):
+        """闲时任务不占用 busy 状态，避免整轮巡检期间按钮一直禁用。"""
+        if self.engine is None:
+            return
+        fut = self.engine.submit(fn, *args)
+        self.root.after(100, lambda: self._crawl_poll(fut, callback))
+
+    def _crawl_poll(self, fut, callback):
+        if not fut.done():
+            self.root.after(100, lambda: self._crawl_poll(fut, callback))
+            return
+        if callback:
+            try:
+                callback(fut)
+            except Exception as exc:  # noqa: BLE001
+                self._crawl_busy = False
+                self._set_status(f"闲时入库失败：{exc}", RED)
+
+    def _crawl_tick(self):
+        """空闲时逐条把全市场期权链写入数据库。"""
+        self._crawl_job = None
+        if not self.crawl_on or self.engine is None:
+            return
+        if not self.connected:
+            self._crawl_job = self.root.after(5000, self._crawl_tick)
+            return
+        if self.pending > 0 or self._crawl_busy:
+            self._crawl_job = self.root.after(3000, self._crawl_tick)
+            return
+        if self._crawl_next_ts and time.time() < self._crawl_next_ts:
+            self._crawl_job = self.root.after(5000, self._crawl_tick)
+            return
+
+        if not self.crawl_plan:
+            missing = [ex for ex in EXCHANGES
+                       if ex not in self.engine.products_loaded() and ex not in self.crawl_tried]
+            if missing:
+                self._crawl_busy = True
+                self._crawl_submit(self.engine.load_products, missing[0], False,
+                                   callback=lambda f: self._after_crawl_products(f, missing[0]))
+                return
+            self.crawl_plan = self.engine.crawl_plan()
+            self.crawl_total = len(self.crawl_plan)
+            self.crawl_done = 0
+            if not self.crawl_plan:
+                self._crawl_job = self.root.after(15000, self._crawl_tick)
+                return
+            self._set_status(f"闲时入库：本轮 {self.crawl_total} 条期权链", CYAN)
+            self._refresh_db_label()
+
+        ex, prod, exp = self.crawl_plan.pop(0)
+        self._crawl_busy = True
+        self._crawl_submit(self.engine.query_chain, ex, prod, exp, 3,
+                           callback=lambda f: self._after_crawl_one(f, ex, prod, exp))
+
+    def _after_crawl_products(self, fut, exchange: str):
+        self._crawl_busy = False
+        self.crawl_tried.add(exchange)
+        try:
+            fut.result()
+            self._set_status(f"{EXCHANGES.get(exchange, exchange)} 品种已加载，继续入库", CYAN)
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"{exchange} 品种加载失败：{exc}", RED)
+        self._crawl_job = self.root.after(800, self._crawl_tick)
+
+    def _after_crawl_one(self, fut, exchange: str, product: str, expiry: str):
+        self._crawl_busy = False
+        try:
+            res = fut.result()
+            n = len(res.get("chain") or [])
+            self._set_status(f"入库 {exchange}.{product} {expiry} · {n} 合约", CYAN)
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"入库失败 {exchange}.{product} {expiry}：{exc}", RED)
+        self.crawl_done += 1
+        self._refresh_db_label()
+        if not self.crawl_plan:
+            self._crawl_next_ts = time.time() + 120  # 整轮结束后歇两分钟再巡一遍
+            self.crawl_tried.clear()
+        self._crawl_job = self.root.after(1200, self._crawl_tick)
 
     # ---------------------------------------------------------------- entry signal
     def _toggle_sound(self):
@@ -1511,8 +1666,19 @@ class App:
                 self.root.after_cancel(self._refresh_job)
             except Exception:
                 pass
+        if self._crawl_job is not None:
+            try:
+                self.root.after_cancel(self._crawl_job)
+            except Exception:
+                pass
         if self.engine is not None:
             self.engine.stop()
+            self.engine.store = None
+        if self.store is not None:
+            try:
+                self.store.close()
+            except Exception:
+                pass
         self.root.destroy()
 
 

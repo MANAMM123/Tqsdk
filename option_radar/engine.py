@@ -78,6 +78,8 @@ class Engine(threading.Thread):
         self._quotes: dict[str, object] = {}
         self._kline_ts: dict[str, float] = {}
         self._KLINE_TTL = 600.0  # 日线 10 分钟内复用
+        # 本地数据库（由 app 注入，可为 None）
+        self.store = None
         # 日内 PCR 追踪：key="exchange.product.expiry", value=[(ts, pcr, f)]
         self._pcr_log: dict[str, list[tuple]] = {}
         self._data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -511,7 +513,7 @@ class Engine(threading.Thread):
         chain["gex_share_pct"] = chain["strike"].map(share_map)
 
         expiry_days = int(round(days)) if _finite(days) else 0
-        return {
+        result = {
             "exchange": exchange,
             "product": product,
             "expiry": expiry_key,
@@ -526,6 +528,27 @@ class Engine(threading.Thread):
             "cone": cone,
             "pcr_series": pcr_series,
         }
+        if self.store is not None:
+            try:
+                self.store.save_chain(result)
+            except Exception as exc:  # 入库失败不影响查询
+                self.notify("status", f"数据库写入失败：{exc}")
+        return result
+
+    def crawl_plan(self, max_expiries: int = 2) -> list[tuple]:
+        """闲时全市场入库计划：每个品种取最近 N 个到期月。"""
+        plan: list[tuple] = []
+        for ex in sorted(self._products):
+            for prod in self._products[ex]:
+                exps = [e for e in prod["expiries"] if _finite(e["days"]) and e["days"] >= 0]
+                if not exps:
+                    exps = list(prod["expiries"])
+                for e in exps[:max_expiries]:
+                    plan.append((ex, prod["product"], e["key"]))
+        return plan
+
+    def products_loaded(self) -> list[str]:
+        return [ex for ex in self._products if self._products[ex]]
 
     @staticmethod
     def _infer_forward(chain: pd.DataFrame) -> float:
