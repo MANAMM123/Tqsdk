@@ -9,6 +9,7 @@ import json
 import math
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -57,7 +58,7 @@ YELLOW = "#ffb000"
 PURPLE = "#b388ff"
 BLUE = "#4f9dff"
 
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 
 def _valid(x) -> bool:
@@ -89,6 +90,15 @@ def fpct(x, digits: int = 1, signed: bool = True) -> str:
     if not _valid(x):
         return "—"
     return f"{float(x):+,.{digits}f}%" if signed else f"{float(x):.{digits}f}%"
+
+
+def readable_contract(symbol: str) -> str:
+    """郑商所三位月份补全年份：CZCE.SA701 → SA2701；其它市场原样返回代码。"""
+    code = str(symbol or "").split(".")[-1].strip()
+    m = re.match(r"^([A-Za-z]+)(\d{3})$", code)
+    if not m:
+        return code or "—"
+    return f"{m.group(1)}{str(2020 + int(m.group(2)[0]))[-2:]}{m.group(2)[1:]}"
 
 
 def fyi(x) -> str:
@@ -979,11 +989,13 @@ class App:
         gex = r["gex"]
         m = r["metrics"]
         F = r["F"]
+        spot_name = readable_contract(r["spot_symbol"]) if r["spot_symbol"] not in ("—", "平价隐含") else r["spot_symbol"]
         self.gex_info.configure(
-            text=f"{r['exchange']}.{r['product']} {r['expiry']} | {r['days']}天 | 合约 {m['contracts']}")
+            text=(f"{r['exchange']}.{r['product']} 期权到期 {r['expiry']} · 标的 {spot_name}"
+                  f" | {r['days']}天 | 合约 {m['contracts']}"))
 
         # KPI（7 卡，对齐参考图）
-        self._set_kpi("price", fnum(F, 1), f"标的 {r['spot_symbol']}")
+        self._set_kpi("price", fnum(F, 1), f"标的 {spot_name} 期货" if spot_name not in ("—", "平价隐含") else f"标的 {spot_name}")
         self._set_kpi("net_gex", fyi(m["net_gex"]),
                       f"Call {fyi(m['call_gex'])} / Put {fyi(m['put_gex'])}")
         self._set_kpi("gamma_flip", fnum(m["zero_gamma"], 1),
